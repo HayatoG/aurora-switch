@@ -841,7 +841,9 @@ GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept {
 }
 
 void initialize() noexcept {
+  Log.info("GX initialize begin");
   {
+    Log.info("GX create texture bind group layout begin");
     std::array<wgpu::BindGroupLayoutEntry, MaxTextures * 2> textureEntries;
     for (u32 i = 0; i < MaxTextures; ++i) {
       textureEntries[i * 2] = {
@@ -865,22 +867,31 @@ void initialize() noexcept {
         .entries = textureEntries.data(),
     };
     sTextureBindGroupLayout = g_device.CreateBindGroupLayout(&descriptor);
+    Log.info("GX create texture bind group layout done");
   }
   {
+    Log.info("GX create empty sampler begin");
     constexpr wgpu::SamplerDescriptor descriptor{.label = "Empty sampler"};
     sEmptySampler = gfx::sampler_ref(descriptor);
+    Log.info("GX create empty sampler done");
   }
   {
+    Log.info("GX create empty texture begin");
     constexpr wgpu::TextureDescriptor descriptor{
         .label = "Empty texture",
         .usage = wgpu::TextureUsage::TextureBinding,
+        .dimension = wgpu::TextureDimension::e2D,
         .size = {1, 1},
         .format = wgpu::TextureFormat::RGBA8Unorm,
+        .mipLevelCount = 1,
+        .sampleCount = 1,
     };
     sEmptyTexture = g_device.CreateTexture(&descriptor);
     sEmptyTextureView = sEmptyTexture.CreateView();
+    Log.info("GX create empty texture done");
   }
   {
+    Log.info("GX create empty texture bind group begin");
     std::array<wgpu::BindGroupEntry, MaxTextures * 2> entries;
     for (u32 i = 0; i < MaxTextures; ++i) {
       entries[i * 2] = {
@@ -899,8 +910,10 @@ void initialize() noexcept {
         .entries = entries.data(),
     };
     g_emptyTextureBindGroup = g_device.CreateBindGroup(&desc);
+    Log.info("GX create empty texture bind group done");
   }
   {
+    Log.info("GX create pipeline layout begin");
     const std::array layouts{
         gfx::g_staticBindGroupLayout,
         gfx::g_uniformBindGroupLayout,
@@ -912,7 +925,9 @@ void initialize() noexcept {
         .bindGroupLayouts = layouts.data(),
     };
     sPipelineLayout = g_device.CreatePipelineLayout(&desc);
+    Log.info("GX create pipeline layout done");
   }
+  Log.info("GX initialize done");
 }
 
 void shutdown() noexcept {

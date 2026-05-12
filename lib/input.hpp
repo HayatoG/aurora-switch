@@ -1,20 +1,26 @@
 #pragma once
 
 #include <string>
-#include "dolphin/pad.h" // For PADDeaZones and PADButtonMapping
+#include "logging.hpp"
+
+#include <absl/container/flat_hash_map.h>
+
+#if defined(__SWITCH__)
+#include "SDL3/SDL_gamepad.h"
+#else
+#include "dolphin/pad.h" // For PADDeadZones and PADButtonMapping
 #include "SDL3/SDL_gamepad.h"
 #include "SDL3/SDL_keyboard.h"
 #include "SDL3/SDL_keycode.h"
 #include "SDL3/SDL_mouse.h"
-#include "logging.hpp"
-
-#include <absl/container/flat_hash_map.h>
+#endif
 
 namespace aurora::input {
 extern Module Log;
 
 struct GameController {
   SDL_Gamepad* m_controller = nullptr;
+#if !defined(__SWITCH__)
   bool m_isGameCube = false;
   Sint32 m_index = -1;
   bool m_hasRumble = false;
@@ -41,6 +47,7 @@ struct GameController {
   uint8_t m_ledBlue = 0xFF;
   bool m_isColorDirty = true;
   bool m_hasRgbLed = false;
+#endif
 };
 
 GameController* get_controller_for_player(uint32_t player) noexcept;

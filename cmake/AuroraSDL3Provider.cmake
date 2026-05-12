@@ -5,6 +5,16 @@ include_guard(GLOBAL)
 # After this module runs, the variable AURORA_SDL3_TARGET is set to the
 # appropriate target name for use in target_link_libraries() calls.
 
+if (AURORA_PLATFORM_SWITCH)
+  if (NOT TARGET aurora_sdl3_standalone)
+    add_library(aurora_sdl3_standalone INTERFACE)
+  endif ()
+  set(AURORA_SDL3_TARGET aurora_sdl3_standalone CACHE INTERNAL "")
+  set(AURORA_SDL3_PROVIDER "standalone" CACHE STRING "" FORCE)
+  message(STATUS "aurora: Using standalone Switch window backend")
+  return()
+endif ()
+
 # Select the SDL3 target matching the requested linkage.
 function(_aurora_sdl3_select_target)
   if (AURORA_SDL3_LINKAGE STREQUAL "static")

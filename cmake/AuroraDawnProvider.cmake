@@ -38,6 +38,53 @@ function(_aurora_dawn_set_platform_backends)
   endif ()
 endfunction()
 
+function(_aurora_dawn_set_source_build_options)
+  if (AURORA_DAWN_LINKAGE STREQUAL "shared")
+    set(DAWN_BUILD_MONOLITHIC_LIBRARY SHARED CACHE INTERNAL
+      "Bundle all dawn components into a single shared library.")
+  else ()
+    set(DAWN_BUILD_MONOLITHIC_LIBRARY STATIC CACHE INTERNAL
+      "Bundle all dawn components into a single static library.")
+  endif ()
+  set(DAWN_BUILD_SAMPLES OFF CACHE INTERNAL "Disable Dawn sample applications")
+  set(DAWN_BUILD_BENCHMARKS OFF CACHE INTERNAL "Disable Dawn benchmarks")
+  set(DAWN_SUPPORTS_GLFW_FOR_WINDOWING OFF CACHE INTERNAL "Disable Dawn GLFW windowing")
+  set(DAWN_ENABLE_DESKTOP_GL OFF CACHE INTERNAL "Enable compilation of the OpenGL backend")
+  set(DAWN_ENABLE_OPENGLES OFF CACHE INTERNAL "Enable compilation of the OpenGL ES backend")
+  set(DAWN_FETCH_DEPENDENCIES ON CACHE INTERNAL
+    "Use fetch_dawn_dependencies.py as an alternative to using depot_tools")
+  if (AURORA_PLATFORM_SWITCH)
+    set(DAWN_PLATFORM_SWITCH ON CACHE INTERNAL "Enable Dawn Switch platform support")
+    set(DAWN_FETCH_DEPENDENCIES OFF CACHE INTERNAL
+      "Use the checked out Dawn third_party dependencies")
+    set(DAWN_ENABLE_D3D11 OFF CACHE INTERNAL "Disable D3D11")
+    set(DAWN_ENABLE_D3D12 OFF CACHE INTERNAL "Disable D3D12")
+    set(DAWN_ENABLE_METAL OFF CACHE INTERNAL "Disable Metal")
+    set(DAWN_ENABLE_VULKAN ON CACHE INTERNAL "Enable Vulkan")
+    set(DAWN_ENABLE_NULL ON CACHE INTERNAL "Enable Null")
+    set(DAWN_USE_WAYLAND OFF CACHE INTERNAL "Disable Wayland")
+    set(DAWN_USE_X11 OFF CACHE INTERNAL "Disable X11")
+  endif ()
+  if (CMAKE_SYSTEM_NAME STREQUAL Linux)
+    set(DAWN_USE_WAYLAND ON CACHE INTERNAL "Enable support for Wayland surface")
+  endif ()
+  set(TINT_BUILD_TESTS OFF CACHE INTERNAL "Build tests")
+  set(TINT_BUILD_CMD_TOOLS OFF CACHE INTERNAL "Build the Tint command line tools")
+  if (NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY OR CMAKE_MSVC_RUNTIME_LIBRARY MATCHES "DLL$")
+    set(ABSL_MSVC_STATIC_RUNTIME OFF CACHE INTERNAL "Link static runtime libraries")
+  else ()
+    set(ABSL_MSVC_STATIC_RUNTIME ON CACHE INTERNAL "Link static runtime libraries")
+  endif ()
+endfunction()
+
+function(_aurora_dawn_set_linkage_result)
+  if (AURORA_DAWN_LINKAGE STREQUAL "shared")
+    set(AURORA_DAWN_IS_SHARED TRUE PARENT_SCOPE)
+  else ()
+    set(AURORA_DAWN_IS_SHARED FALSE PARENT_SCOPE)
+  endif ()
+endfunction()
+
 # ── Auto: resolve provider based on platform availability ──
 set(_aurora_dawn_provider "${AURORA_DAWN_PROVIDER}")
 if (_aurora_dawn_provider STREQUAL "auto")
@@ -72,30 +119,7 @@ if (_aurora_dawn_provider STREQUAL "vendor")
   if (NOT TARGET webgpu_dawn)
     message(STATUS "aurora: Fetching Dawn (provider=vendor, linkage=${AURORA_DAWN_LINKAGE})")
 
-    if (AURORA_DAWN_LINKAGE STREQUAL "shared")
-      set(DAWN_BUILD_MONOLITHIC_LIBRARY SHARED CACHE INTERNAL
-        "Bundle all dawn components into a single shared library.")
-    else ()
-      set(DAWN_BUILD_MONOLITHIC_LIBRARY STATIC CACHE INTERNAL
-        "Bundle all dawn components into a single static library.")
-    endif ()
-    set(DAWN_BUILD_SAMPLES OFF CACHE INTERNAL "Disable Dawn sample applications")
-    set(DAWN_BUILD_BENCHMARKS OFF CACHE INTERNAL "Disable Dawn benchmarks")
-    set(DAWN_SUPPORTS_GLFW_FOR_WINDOWING OFF CACHE INTERNAL "Disable Dawn GLFW windowing")
-    set(DAWN_ENABLE_DESKTOP_GL OFF CACHE INTERNAL "Enable compilation of the OpenGL backend")
-    set(DAWN_ENABLE_OPENGLES OFF CACHE INTERNAL "Enable compilation of the OpenGL ES backend")
-    set(DAWN_FETCH_DEPENDENCIES ON CACHE INTERNAL
-      "Use fetch_dawn_dependencies.py as an alternative to using depot_tools")
-    if (CMAKE_SYSTEM_NAME STREQUAL Linux)
-      set(DAWN_USE_WAYLAND ON CACHE INTERNAL "Enable support for Wayland surface")
-    endif ()
-    set(TINT_BUILD_TESTS OFF CACHE INTERNAL "Build tests")
-    set(TINT_BUILD_CMD_TOOLS OFF CACHE INTERNAL "Build the Tint command line tools")
-    if (NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY OR CMAKE_MSVC_RUNTIME_LIBRARY MATCHES "DLL$")
-      set(ABSL_MSVC_STATIC_RUNTIME OFF CACHE INTERNAL "Link static runtime libraries")
-    else ()
-      set(ABSL_MSVC_STATIC_RUNTIME ON CACHE INTERNAL "Link static runtime libraries")
-    endif ()
+    _aurora_dawn_set_source_build_options()
 
     include(FetchContent)
     FetchContent_Declare(dawn
@@ -111,11 +135,41 @@ if (_aurora_dawn_provider STREQUAL "vendor")
     message(STATUS "aurora: Using existing Dawn")
   endif ()
 
-  if (AURORA_DAWN_LINKAGE STREQUAL "shared")
-    set(AURORA_DAWN_IS_SHARED TRUE PARENT_SCOPE)
-  else ()
-    set(AURORA_DAWN_IS_SHARED FALSE PARENT_SCOPE)
+  _aurora_dawn_set_linkage_result()
+
+elseif (_aurora_dawn_provider STREQUAL "source")
+  # ── Source: build a local Dawn checkout, useful for platform bring-up patches ──
+  if (NOT AURORA_DAWN_SOURCE_DIR)
+    message(FATAL_ERROR "AURORA_DAWN_PROVIDER=source requires AURORA_DAWN_SOURCE_DIR")
   endif ()
+  get_filename_component(_aurora_dawn_source_dir "${AURORA_DAWN_SOURCE_DIR}" ABSOLUTE)
+  if (NOT EXISTS "${_aurora_dawn_source_dir}/CMakeLists.txt")
+    message(FATAL_ERROR
+      "AURORA_DAWN_SOURCE_DIR does not look like a Dawn source tree: "
+      "${_aurora_dawn_source_dir}")
+  endif ()
+
+  if (NOT TARGET webgpu_dawn AND NOT TARGET dawn::webgpu_dawn)
+    message(STATUS
+      "aurora: Building local Dawn source from ${_aurora_dawn_source_dir} "
+      "(provider=source, linkage=${AURORA_DAWN_LINKAGE})")
+
+    _aurora_dawn_set_source_build_options()
+
+    include(FetchContent)
+    FetchContent_Declare(dawn
+      SOURCE_DIR "${_aurora_dawn_source_dir}"
+      EXCLUDE_FROM_ALL
+    )
+    FetchContent_MakeAvailable(dawn)
+    if (NOT TARGET webgpu_dawn AND NOT TARGET dawn::webgpu_dawn)
+      message(FATAL_ERROR "Failed to make local Dawn source available")
+    endif ()
+  else ()
+    message(STATUS "aurora: Using existing Dawn")
+  endif ()
+
+  _aurora_dawn_set_linkage_result()
 
 elseif (_aurora_dawn_provider STREQUAL "system")
   # ── System: find_package(Dawn) ──
@@ -209,7 +263,7 @@ elseif (_aurora_dawn_provider STREQUAL "package")
 
 else ()
   message(FATAL_ERROR "Invalid AURORA_DAWN_PROVIDER: ${AURORA_DAWN_PROVIDER} "
-    "(must be auto, vendor, system, or package)")
+    "(must be auto, vendor, source, system, or package)")
 endif ()
 
 # Ensure dawn::dawncpp_headers target exists (needed by tests).

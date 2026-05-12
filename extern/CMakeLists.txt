@@ -76,7 +76,7 @@ else ()
   message(STATUS "aurora: Using existing fmt")
 endif ()
 
-if (AURORA_ENABLE_GX)
+if (AURORA_ENABLE_GX AND AURORA_ENABLE_IMGUI)
   find_package(Freetype QUIET)
   if (NOT TARGET Freetype::Freetype)
     message(STATUS "aurora: Fetching Freetype")
@@ -139,7 +139,9 @@ if (AURORA_ENABLE_GX)
     target_sources(imgui PRIVATE ${PROJECT_SOURCE_DIR}/lib/imgui_config.cpp)
     target_link_libraries(imgui PRIVATE ${AURORA_SDL3_TARGET})
   endif ()
+endif ()
 
+if (AURORA_ENABLE_GX AND AURORA_ENABLE_GPU_CACHE)
   if (NOT TARGET sqlite3)
     message(STATUS "aurora: Fetching sqlite3")
     FetchContent_Declare(sqlite3
@@ -174,9 +176,14 @@ if (AURORA_ENABLE_GX)
       message(STATUS "aurora: Using existing zstd")
     endif ()
   endif ()
+endif ()
 
+if (AURORA_ENABLE_GX)
   if(AURORA_ENABLE_RMLUI AND NOT TARGET RmlUi)
     message(STATUS "aurora: Fetching RmlUi")
+    if (AURORA_PLATFORM_SWITCH)
+      set(RMLUI_CUSTOM_RTTI ON CACHE BOOL "Use RmlUi custom RTTI" FORCE)
+    endif ()
     FetchContent_Declare(rmlui
             URL https://github.com/mikke89/RmlUi/archive/f9b8c9e2935d5df2c7dff2c190d3968e99b0c3dc.tar.gz
             URL_HASH SHA256=42b830abc2509a8c07cf02ba3313505de3a4642725654f489402022d8fefdd79
@@ -185,37 +192,76 @@ if (AURORA_ENABLE_GX)
     )
     FetchContent_MakeAvailable(rmlui)
 
-    add_library(rmlui_backends STATIC
-            ${rmlui_SOURCE_DIR}/Backends/RmlUi_Platform_SDL.cpp
-    )
-    # TODO: maybe dont hardcode this to SDL3?
-    target_compile_definitions(rmlui_backends PUBLIC RMLUI_SDL_VERSION_MAJOR=3)
+    if (AURORA_PLATFORM_SWITCH)
+      set(_aurora_switch_portlibs "$ENV{DEVKITPRO}/portlibs/switch/lib")
+      find_library(AURORA_SWITCH_PNG_LIBRARY NAMES png png16
+              PATHS "${_aurora_switch_portlibs}"
+              NO_DEFAULT_PATH)
+      find_library(AURORA_SWITCH_HARFBUZZ_LIBRARY NAMES harfbuzz
+              PATHS "${_aurora_switch_portlibs}"
+              NO_DEFAULT_PATH)
+      find_library(AURORA_SWITCH_BZ2_LIBRARY NAMES bz2
+              PATHS "${_aurora_switch_portlibs}"
+              NO_DEFAULT_PATH)
 
-    target_include_directories(rmlui_backends PUBLIC
-            ${rmlui_SOURCE_DIR}/Backends
-    )
+      foreach (_aurora_switch_lib IN ITEMS
+              AURORA_SWITCH_PNG_LIBRARY
+              AURORA_SWITCH_HARFBUZZ_LIBRARY
+              AURORA_SWITCH_BZ2_LIBRARY)
+        if (NOT ${_aurora_switch_lib})
+          message(FATAL_ERROR "aurora: Missing Switch Freetype dependency ${_aurora_switch_lib}")
+        endif ()
+      endforeach ()
 
-    target_link_libraries(rmlui_backends PRIVATE rmlui ${AURORA_SDL3_TARGET})
+      target_link_libraries(rmlui_core PRIVATE
+              ${AURORA_SWITCH_PNG_LIBRARY}
+              ${AURORA_SWITCH_HARFBUZZ_LIBRARY}
+              ${AURORA_SWITCH_BZ2_LIBRARY})
+      unset(_aurora_switch_portlibs)
+
+      add_library(rmlui_backends INTERFACE)
+      target_include_directories(rmlui_backends INTERFACE
+              ${rmlui_SOURCE_DIR}/Backends
+      )
+    else ()
+      add_library(rmlui_backends STATIC
+              ${rmlui_SOURCE_DIR}/Backends/RmlUi_Platform_SDL.cpp
+      )
+      # TODO: maybe dont hardcode this to SDL3?
+      target_compile_definitions(rmlui_backends PUBLIC RMLUI_SDL_VERSION_MAJOR=3)
+
+      target_include_directories(rmlui_backends PUBLIC
+              ${rmlui_SOURCE_DIR}/Backends
+      )
+
+      target_link_libraries(rmlui_backends PRIVATE rmlui ${AURORA_SDL3_TARGET})
+    endif ()
 
   endif ()
 
 endif ()
 
 if (NOT TARGET TracyClient)
-  message(STATUS "aurora: Fetching Tracy")
+  if (AURORA_PLATFORM_SWITCH)
+    message(STATUS "aurora: Using Tracy stub for Switch")
+    add_library(TracyClient INTERFACE)
+    target_include_directories(TracyClient INTERFACE ${PROJECT_SOURCE_DIR}/lib/switch/tracy_stub)
+  else ()
+    message(STATUS "aurora: Fetching Tracy")
 
-  # Default to off, users can enable the cache variable if they want to use it.
-  set(TRACY_ENABLE OFF CACHE BOOL "Enable Tracy profiling")
+    # Default to off, users can enable the cache variable if they want to use it.
+    set(TRACY_ENABLE OFF CACHE BOOL "Enable Tracy profiling")
 
-  FetchContent_Declare(
-          tracy
-          URL https://github.com/wolfpld/tracy/archive/a64b9a20294d59421a2f57aeca3c6383d8c48169.tar.gz
-          URL_HASH SHA256=24d342b5127d7f659dc3cf94f24347b348cc736f25b17a691fd7f69541937658
-          DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-  )
-  FetchContent_MakeAvailable(tracy)
+    FetchContent_Declare(
+            tracy
+            URL https://github.com/wolfpld/tracy/archive/a64b9a20294d59421a2f57aeca3c6383d8c48169.tar.gz
+            URL_HASH SHA256=24d342b5127d7f659dc3cf94f24347b348cc736f25b17a691fd7f69541937658
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_MakeAvailable(tracy)
 
-  if (NOT TARGET TracyClient)
-    message(FATAL_ERROR "Failed to make TracyClient available")
+    if (NOT TARGET TracyClient)
+      message(FATAL_ERROR "Failed to make TracyClient available")
+    endif ()
   endif ()
 endif ()

@@ -3,6 +3,8 @@
 #include <aurora/aurora.h>
 #include <aurora/event.h>
 
+#include <cstdint>
+
 struct SDL_Window;
 struct SDL_Renderer;
 
@@ -13,7 +15,7 @@ enum class CustomEvent {
   RefreshSurface,
   End,
 };
-static Uint32 operator+(Uint32 lhs, CustomEvent rhs) { return lhs + static_cast<Uint32>(rhs); }
+static uint32_t operator+(uint32_t lhs, CustomEvent rhs) { return lhs + static_cast<uint32_t>(rhs); }
 
 // On Android in particular, we need to hold a mutex around critical areas like surface creation
 // and presentation, so that the SDLActivity doesn't destroy the surface out from underneath us.
@@ -38,6 +40,7 @@ AuroraWindowSize get_window_size();
 const AuroraEvent* poll_events();
 SDL_Window* get_sdl_window();
 SDL_Renderer* get_sdl_renderer();
+void* get_native_window();
 bool is_paused() noexcept;
 bool is_presentable() noexcept;
 void set_surface_ready(bool ready) noexcept;

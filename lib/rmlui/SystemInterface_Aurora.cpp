@@ -1,18 +1,25 @@
 #include "SystemInterface_Aurora.h"
 
+#ifdef AURORA_PLATFORM_SWITCH
+#include <SDL3/SDL_timer.h>
+#else
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_properties.h>
+#endif
 #include <algorithm>
 
 #include "../logging.hpp"
+#ifndef AURORA_PLATFORM_SWITCH
 #include "../window.hpp"
 #include "../webgpu/gpu.hpp"
+#endif
 
 namespace aurora::rmlui {
 namespace {
 
 Module Log("aurora::rmlui");
 
+#ifndef AURORA_PLATFORM_SWITCH
 SDL_TextInputType sdl_input_type(InputType type) noexcept {
   switch (type) {
   case InputType::Number:
@@ -38,9 +45,21 @@ bool start_text_input(SDL_Window* window, InputType type) {
   SDL_DestroyProperties(props);
   return result;
 }
+#endif
 
 } // namespace
 
+#ifdef AURORA_PLATFORM_SWITCH
+SystemInterface_Aurora::SystemInterface_Aurora() = default;
+
+double SystemInterface_Aurora::GetElapsedTime() {
+  return static_cast<double>(SDL_GetTicksNS()) / 1000000000.0;
+}
+
+void SystemInterface_Aurora::ActivateKeyboard(Rml::Vector2f, float) {}
+
+void SystemInterface_Aurora::DeactivateKeyboard() {}
+#else
 SystemInterface_Aurora::SystemInterface_Aurora() : SystemInterface_SDL(window::get_sdl_window()) {}
 
 void SystemInterface_Aurora::SetInputType(InputType type) noexcept { mTextInputType = type; }
@@ -102,6 +121,11 @@ void SystemInterface_Aurora::DeactivateKeyboard() {
   }
   mHasActiveTextInputType = false;
 }
+#endif
+
+#ifdef AURORA_PLATFORM_SWITCH
+void SystemInterface_Aurora::SetInputType(InputType type) noexcept { mTextInputType = type; }
+#endif
 
 bool SystemInterface_Aurora::LogMessage(Rml::Log::Type type, const Rml::String& message) {
   switch (type) {

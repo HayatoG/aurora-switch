@@ -1,4 +1,16 @@
 #include <dolphin/si.h>
+
+#if defined(AURORA_PLATFORM_SWITCH) || defined(__SWITCH__)
+
+u32 SIProbe(s32 chan) {
+  if (chan < 0 || chan >= SI_MAX_CHAN) {
+    return SI_ERROR_NO_RESPONSE;
+  }
+  return SI_GC_CONTROLLER;
+}
+
+#else
+
 #include "../../input.hpp"
 
 #include <SDL3/SDL_power.h>
@@ -18,3 +30,5 @@ uint32_t SIProbe(int32_t chan) {
 
   return SI_GC_CONTROLLER;
 }
+
+#endif

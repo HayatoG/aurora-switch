@@ -2,7 +2,9 @@
 
 #include <RmlUi/Core.h>
 #include <RmlUi_Backend.h>
+#ifndef AURORA_PLATFORM_SWITCH
 #include <RmlUi_Platform_SDL.h>
+#endif
 
 #include "window.hpp"
 #include "internal.hpp"
@@ -18,6 +20,15 @@ FileInterface_SDL* g_fileInterface = nullptr;
 
 namespace {
 Module Log("aurora::rmlui");
+
+#ifdef AURORA_PLATFORM_SWITCH
+namespace RmlSDL {
+int GetKeyModifierState() { return 0; }
+int ConvertMouseButton(uint8_t button) { return static_cast<int>(button); }
+bool InputEventHandler(Rml::Context*, SDL_Window*, SDL_Event&) { return false; }
+} // namespace RmlSDL
+#endif
+
 constexpr size_t MaxTrackedTouches = 16;
 
 struct TrackedTouch {
@@ -353,13 +364,13 @@ RenderOutput render(const wgpu::CommandEncoder& encoder, const webgpu::Viewport&
   }
 
   const Rml::Vector2i dim = dimensions_from_viewport(presentViewport);
+  sync_context_metrics(dim);
+  g_context->Update();
+
   ensure_render_target(dim);
   if (!s_renderTarget.view) {
     return {};
   }
-
-  sync_context_metrics(dim);
-  g_context->Update();
 
   auto* renderInterface = get_render_interface();
   renderInterface->SetWindowSize(g_context->GetDimensions());

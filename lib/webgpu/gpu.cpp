@@ -52,6 +52,10 @@ static wgpu::SurfaceCapabilities g_surfaceCapabilities;
 namespace {
 
 wgpu::PresentMode best_present_mode(bool vsync) {
+#ifdef __SWITCH__
+  (void)vsync;
+  return wgpu::PresentMode::Fifo;
+#else
   const auto supports = [](const wgpu::PresentMode candidate) {
     for (size_t i = 0; i < g_surfaceCapabilities.presentModeCount; ++i) {
       if (g_surfaceCapabilities.presentModes[i] == candidate) {
@@ -74,6 +78,7 @@ wgpu::PresentMode best_present_mode(bool vsync) {
     }
   }
   return wgpu::PresentMode::Fifo;
+#endif
 }
 
 wgpu::TextureFormat to_linear(wgpu::TextureFormat format) {
@@ -606,6 +611,7 @@ bool initialize(AuroraBackend auroraBackend) {
     });
   }
   g_queue = g_device.GetQueue();
+  Log.info("WebGPU device and queue ready");
 
   const wgpu::Status status = g_surface.GetCapabilities(g_adapter, &g_surfaceCapabilities);
   if (status != wgpu::Status::Success) {
@@ -625,6 +631,8 @@ bool initialize(AuroraBackend auroraBackend) {
   Log.info("Using surface format {}, present mode {}", magic_enum::enum_name(surfaceFormat),
            magic_enum::enum_name(presentMode));
   const auto size = window::get_window_size();
+  Log.info("Initial window size fb={}x{} native={}x{} msaa={}", size.fb_width, size.fb_height, size.native_fb_width,
+           size.native_fb_height, g_config.msaa);
   g_graphicsConfig = GraphicsConfig{
       .surfaceConfiguration =
           wgpu::SurfaceConfiguration{
@@ -638,10 +646,14 @@ bool initialize(AuroraBackend auroraBackend) {
       .msaaSamples = g_config.msaa,
       .textureAnisotropy = g_config.maxTextureAnisotropy,
   };
+  Log.info("Creating copy pipeline");
   create_copy_pipeline();
+  Log.info("Created copy pipeline");
   {
     window::SurfaceLock surfaceLock;
+    Log.info("Initial swapchain resize begin");
     resize_swapchain(size.fb_width, size.fb_height, size.native_fb_width, size.native_fb_height, true);
+    Log.info("Initial swapchain resize done");
   }
   return true;
 }
@@ -701,9 +713,10 @@ void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, ui
   if (!g_surface || !g_device || width == 0 || height == 0 || native_height == 0 || native_width == 0) {
     return;
   }
-  const bool sizeChanged = g_graphicsConfig.surfaceConfiguration.width != native_width ||
-                           g_graphicsConfig.surfaceConfiguration.height != native_height ||
-                           g_frameBuffer.size.width != width || g_frameBuffer.size.height != height;
+  const bool surfaceChanged = g_graphicsConfig.surfaceConfiguration.width != native_width ||
+                              g_graphicsConfig.surfaceConfiguration.height != native_height;
+  const bool framebufferChanged = g_frameBuffer.size.width != width || g_frameBuffer.size.height != height;
+  const bool sizeChanged = surfaceChanged || framebufferChanged;
   if (!force && !sizeChanged) {
     return;
   }
@@ -715,15 +728,35 @@ void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, ui
   g_graphicsConfig.surfaceConfiguration.height = native_height;
   auto surfaceConfiguration = g_graphicsConfig.surfaceConfiguration;
   surfaceConfiguration.device = g_device;
-  g_surface.Configure(&surfaceConfiguration);
+  Log.info("Resize swapchain begin fb={}x{} native={}x{} force={} changed={} presentMode={}", width, height,
+           native_width, native_height, force, sizeChanged, magic_enum::enum_name(surfaceConfiguration.presentMode));
+  if (force || surfaceChanged) {
+    Log.info("Surface configure begin");
+    g_surface.Configure(&surfaceConfiguration);
+    Log.info("Surface configure done");
+  } else {
+    Log.info("Surface configure skipped; native size unchanged");
+  }
+  Log.info("Create framebuffer begin msaa={}", g_graphicsConfig.msaaSamples);
   g_frameBuffer = create_render_texture(width, height, true);
+  Log.info("Create framebuffer done");
+  Log.info("Create resolved framebuffer begin");
   g_frameBufferResolved = create_render_texture(width, height, false);
+  Log.info("Create resolved framebuffer done");
+  Log.info("Create depth buffer begin");
   g_depthBuffer = create_depth_texture(width, height);
+  Log.info("Create depth buffer done");
+  Log.info("Create copy bind group begin");
   g_CopyBindGroup = create_copy_bind_group(present_source());
+  Log.info("Resize swapchain done");
 }
 } // namespace aurora::webgpu
 
 void aurora_enable_vsync(const bool enabled) {
-  aurora::webgpu::g_graphicsConfig.surfaceConfiguration.presentMode = aurora::webgpu::best_present_mode(enabled);
+  const auto presentMode = aurora::webgpu::best_present_mode(enabled);
+  if (aurora::webgpu::g_graphicsConfig.surfaceConfiguration.presentMode == presentMode) {
+    return;
+  }
+  aurora::webgpu::g_graphicsConfig.surfaceConfiguration.presentMode = presentMode;
   aurora::window::push_custom_event(aurora::window::CustomEvent::RefreshSurface);
 }

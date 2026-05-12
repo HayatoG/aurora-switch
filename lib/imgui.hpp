@@ -2,7 +2,7 @@
 
 #include <aurora/event.h>
 
-union SDL_Event;
+struct SDL_Event;
 
 namespace wgpu {
 class RenderPassEncoder;

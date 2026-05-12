@@ -98,6 +98,13 @@ static std::optional<std::string> GetPrefPath(const char* app) {
 }
 
 std::string ResolveDolphinCardPath(ECardSlot slot, const char* regionCode, bool isGciFolder) {
+#if defined(__SWITCH__)
+  const char slotName = slot == ECardSlot::SlotA ? 'A' : 'B';
+  if (isGciFolder) {
+    return fmt::format("sdmc:/game/GC/{}/Card {}", regionCode, slotName);
+  }
+  return fmt::format("sdmc:/game/GC/MemoryCard{}.{}.raw", slotName, regionCode);
+#else
   const auto dolphinPath = GetPrefPath("dolphin-emu");
   if (!dolphinPath) {
     return {};
@@ -138,6 +145,7 @@ std::string ResolveDolphinCardPath(ECardSlot slot, const char* regionCode, bool 
   }
 
   return path;
+#endif
 }
 #endif
 

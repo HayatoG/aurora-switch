@@ -15,6 +15,9 @@ namespace aurora::rmlui {
 
 inline constexpr bool EnableMsaa = false;
 inline constexpr uint32_t LayerSampleCount = EnableMsaa ? 4 : 1;
+inline constexpr bool EnableClipMaskStencil = true;
+inline constexpr bool EnableAdvancedFilters = true;
+inline constexpr bool EnableCustomShaders = true;
 inline constexpr uint32_t MaxBlurRadius = 3;
 inline constexpr size_t MaxGradientStops = 16;
 inline constexpr size_t GradientStopPositionGroupCount = (MaxGradientStops + 3) / 4;
@@ -105,9 +108,22 @@ class WebGPURenderInterface : public Rml::RenderInterface {
     Rml::Matrix4f colorMatrix;
   };
 
+  struct PendingTextureUpload {
+    wgpu::Buffer buffer;
+    wgpu::Texture texture;
+    wgpu::Extent3D size{};
+    uint32_t bytesPerRow = 0;
+    uint32_t rowsPerImage = 0;
+  };
+
   wgpu::CommandEncoder m_encoder;
   wgpu::RenderPassEncoder m_pass;
   wgpu::TextureView m_frameSeedView;
+  std::vector<PendingTextureUpload> m_pendingTextureUploads;
+  std::vector<wgpu::Buffer> m_frameUploadBuffers;
+  std::vector<wgpu::BindGroup> m_frameBindGroups;
+  wgpu::BindGroup m_drawCommonBindGroup;
+  uint32_t m_drawUniformOffset = 0;
 
   std::array<wgpu::RenderPipeline, static_cast<size_t>(PipelineType::Count)> m_pipelines;
   std::array<wgpu::RenderPipeline, static_cast<size_t>(BlitPipelineType::Count)> m_blitPipelines;

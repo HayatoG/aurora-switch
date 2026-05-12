@@ -462,25 +462,34 @@ PipelineRef pipeline_ref(const gx::PipelineConfig& config) {
 }
 
 void initialize() {
+  Log.info("GFX initialize begin");
   g_frameIndex = 0;
+  Log.info("GFX initialize depth peek");
   depth_peek::initialize();
+  Log.info("GFX initialize texture copy conversion");
   tex_copy_conv::initialize();
+  Log.info("GFX initialize texture palette conversion");
   tex_palette_conv::initialize();
+  Log.info("GFX initialize texture replacement");
   texture_replacement::initialize();
 
   // For uniform & storage buffer offset alignments
   g_device.GetLimits(&g_cachedLimits);
+  Log.info("GFX limits maxBufferSize={} maxUniformBinding={} maxStorageBinding={}", g_cachedLimits.maxBufferSize,
+           g_cachedLimits.maxUniformBufferBindingSize, g_cachedLimits.maxStorageBufferBindingSize);
 
   const auto createBuffer = [](wgpu::Buffer& out, wgpu::BufferUsage usage, uint64_t size, const char* label) {
     if (size <= 0) {
       return;
     }
+    Log.info("GFX create buffer {} size={} usage={}", label, size, underlying(usage));
     const wgpu::BufferDescriptor descriptor{
         .label = label,
         .usage = usage,
         .size = size,
     };
     out = g_device.CreateBuffer(&descriptor);
+    Log.info("GFX create buffer {} done", label);
   };
   createBuffer(g_uniformBuffer, wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst, UniformBufferSize,
                "Shared Uniform Buffer");
@@ -497,9 +506,12 @@ void initialize() {
   }
   currentStagingBuffer = 0;
   s_mappingState.store(BufferMapState::Unmapped, std::memory_order_release);
+  Log.info("GFX map staging buffer begin");
   map_staging_buffer();
+  Log.info("GFX map staging buffer requested");
 
   {
+    Log.info("GFX create static bind group layout begin");
     constexpr std::array layoutEntries{
         // Vertex data buffer
         wgpu::BindGroupLayoutEntry{
@@ -526,6 +538,7 @@ void initialize() {
         .entries = layoutEntries.data(),
     };
     g_staticBindGroupLayout = g_device.CreateBindGroupLayout(&layoutDesc);
+    Log.info("GFX create static bind group layout done");
     const std::array entries{
         wgpu::BindGroupEntry{
             .binding = 0,
@@ -543,9 +556,11 @@ void initialize() {
         .entries = entries.data(),
     };
     g_staticBindGroup = g_device.CreateBindGroup(&bindGroupDescriptor);
+    Log.info("GFX create static bind group done");
   }
 
   {
+    Log.info("GFX create uniform bind group layout begin");
     constexpr std::array layoutEntries{
         // Uniform buffer (dynamic offset)
         wgpu::BindGroupLayoutEntry{
@@ -564,6 +579,7 @@ void initialize() {
         .entries = layoutEntries.data(),
     };
     g_uniformBindGroupLayout = g_device.CreateBindGroupLayout(&layoutDesc);
+    Log.info("GFX create uniform bind group layout done");
     const std::array entries{
         wgpu::BindGroupEntry{
             .binding = 0,
@@ -578,10 +594,14 @@ void initialize() {
         .entries = entries.data(),
     };
     g_uniformBindGroup = g_device.CreateBindGroup(&bindGroupDescriptor);
+    Log.info("GFX create uniform bind group done");
   }
 
+  Log.info("GFX initialize GX begin");
   gx::initialize();
+  Log.info("GFX initialize pipeline cache begin");
   initialize_pipeline_cache();
+  Log.info("GFX initialize done");
 }
 
 void shutdown() {

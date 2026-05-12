@@ -1,5 +1,4 @@
 #include <RmlUi_Backend.h>
-#include <RmlUi_Platform_SDL.h>
 
 #include "WebGPURenderInterface.hpp"
 #include "SystemInterface_Aurora.h"

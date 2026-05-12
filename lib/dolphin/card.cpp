@@ -60,6 +60,24 @@ std::string GetCardFullPath(const std::string& path, const aurora::card::ECardSl
     return (filePath / fmt::format("MemoryCard{}.{}.raw", slot == aurora::card::ECardSlot::SlotA ? "A" : "B", GetCardRegion())).string();
   }
 }
+
+void EnsureCardStorageDirectory(const std::string& path) {
+  if (path.empty()) {
+    return;
+  }
+
+  const std::filesystem::path cardPath(path);
+  const std::filesystem::path dir = CARD_USE_GCI_FOLDER ? cardPath : cardPath.parent_path();
+  if (dir.empty()) {
+    return;
+  }
+
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  if (ec) {
+    Log.error("Failed to create memory card directory '{}': {}", dir.string(), ec.message());
+  }
+}
 } // namespace
 
 extern "C" {
@@ -177,8 +195,6 @@ void CARDInit(const char* game, const char* maker) {
   else
     cardWorkingDir = std::filesystem::current_path().string();
 
-  bool loadedCard = false;
-
   for (int i = 0; i < 2; ++i) {
     // use default working directory if no path was supplied for card
     if (cardPaths[i].empty()) {
@@ -186,20 +202,31 @@ void CARDInit(const char* game, const char* maker) {
     }
 
     const auto& curPath = cardPaths[i];
+    EnsureCardStorageDirectory(curPath);
 
+    bool loadedCard = false;
     if (std::filesystem::exists(curPath)) {
-      CardChannels[i]->open(curPath);
-      loadedCard = true;
-      Log.info("Loaded GC Card Image: {}", curPath);
+      loadedCard = CardChannels[i]->open(curPath);
+      if (loadedCard) {
+        Log.info("Loaded GC Card: {}", curPath);
+      } else {
+        Log.warn("Failed to open existing GC Card: {}", curPath);
+      }
     }
-  }
 
-  // create a SlotA card if no cards were loaded
-  if (!loadedCard) {
-    CardChannels[0]->open(cardPaths[0]);
-    CardChannels[0]->format(aurora::card::ECardSlot::SlotA);
-    CardChannels[0]->close();
-	CardChannels[0]->open(cardPaths[0]);
+    // Twilight Princess only uses Slot A. Auto-create Slot A, but do not create
+    // an unused Slot B image/folder unless the user supplied one already.
+    if (!loadedCard && i == 0) {
+      CardChannels[i]->open(curPath);
+      CardChannels[i]->format(static_cast<aurora::card::ECardSlot>(i));
+      CardChannels[i]->close();
+      loadedCard = CardChannels[i]->open(curPath);
+      if (loadedCard) {
+        Log.info("Created GC Card: {}", curPath);
+      } else {
+        Log.error("Failed to create GC Card: {}", curPath);
+      }
+    }
   }
 }
 

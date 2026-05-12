@@ -12,6 +12,17 @@ option(AURORA_ENABLE_DVD "Enable DVD implementation backed by nod" OFF)  # TODO:
 option(AURORA_ENABLE_CARD "Enable CARD implementation based on kabufuda" ON)
 option(AURORA_ENABLE_RMLUI "Enable HTML/CSS Based UI Library for use in end-user UI development." OFF)
 option(AURORA_CACHE_USE_ZSTD "Compress WebGPU cache entries with zstd" ON)
+option(AURORA_PLATFORM_SWITCH "Use the libnx/NWindow platform backend instead of SDL3" OFF)
+
+if (AURORA_PLATFORM_SWITCH)
+  set(_aurora_default_imgui OFF)
+  set(_aurora_default_gpu_cache OFF)
+else ()
+  set(_aurora_default_imgui ON)
+  set(_aurora_default_gpu_cache ON)
+endif ()
+option(AURORA_ENABLE_IMGUI "Enable ImGui integration" ${_aurora_default_imgui})
+option(AURORA_ENABLE_GPU_CACHE "Enable persistent WebGPU shader cache" ${_aurora_default_gpu_cache})
 
 # Dependency versions
 set(AURORA_DAWN_VERSION "v20260423.175430" CACHE STRING "Dawn version tag (https://github.com/encounter/dawn-build/releases)")
@@ -34,15 +45,16 @@ endif ()
 
 # Dawn/WebGPU (if AURORA_ENABLE_GX)
 set(AURORA_DAWN_PROVIDER "${_default_provider}" CACHE STRING
-  "How to provide Dawn: auto, vendor (build from source), system (find_package/imported), package (download prebuilt)")
-set_property(CACHE AURORA_DAWN_PROVIDER PROPERTY STRINGS auto vendor system package)
+  "How to provide Dawn: auto, vendor (download/build), source (local checkout), system (find_package/imported), package (download prebuilt)")
+set_property(CACHE AURORA_DAWN_PROVIDER PROPERTY STRINGS auto vendor source system package)
 set(AURORA_DAWN_LINKAGE "${_default_linkage}" CACHE STRING "Dawn linkage type preference")
 set_property(CACHE AURORA_DAWN_LINKAGE PROPERTY STRINGS shared static)
+set(AURORA_DAWN_SOURCE_DIR "" CACHE PATH "Local Dawn source directory when AURORA_DAWN_PROVIDER=source")
 
 # SDL3
 set(AURORA_SDL3_PROVIDER "${_default_provider}" CACHE STRING
   "How to provide SDL3: auto, vendor (build from source), system (find_package/imported), or package (download prebuilt)")
-set_property(CACHE AURORA_SDL3_PROVIDER PROPERTY STRINGS auto vendor system package)
+set_property(CACHE AURORA_SDL3_PROVIDER PROPERTY STRINGS auto vendor system package standalone)
 set(AURORA_SDL3_LINKAGE "${_default_linkage}" CACHE STRING "SDL3 linkage type preference")
 set_property(CACHE AURORA_SDL3_LINKAGE PROPERTY STRINGS shared static)
 

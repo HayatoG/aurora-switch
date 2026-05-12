@@ -1,4 +1,8 @@
-add_library(aurora_pad STATIC lib/dolphin/pad/pad.cpp)
+if (AURORA_PLATFORM_SWITCH)
+  add_library(aurora_pad STATIC lib/dolphin/pad/pad_switch.cpp)
+else ()
+  add_library(aurora_pad STATIC lib/dolphin/pad/pad.cpp)
+endif ()
 add_library(aurora::pad ALIAS aurora_pad)
 set_target_properties(aurora_pad PROPERTIES FOLDER "aurora")
 

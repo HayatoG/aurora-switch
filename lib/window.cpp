@@ -25,6 +25,9 @@
 extern "C" void Android_LockActivityMutex(void);
 extern "C" void Android_UnlockActivityMutex(void);
 #endif
+#if defined(__SWITCH__)
+#include <switch.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -434,6 +437,14 @@ AuroraWindowSize get_window_size() {
 SDL_Window* get_sdl_window() { return g_window; }
 
 SDL_Renderer* get_sdl_renderer() { return g_renderer; }
+
+void* get_native_window() {
+#if defined(__SWITCH__)
+  return nwindowGetDefault();
+#else
+  return nullptr;
+#endif
+}
 
 bool is_paused() noexcept {
   if (!is_presentable()) {

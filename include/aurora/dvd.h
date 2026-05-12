@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 #include <stdbool.h>
+#include <dolphin/dvd.h>
 #include <dolphin/types.h>
 
 /**
@@ -14,6 +15,12 @@ extern "C" {
  * Returns true on success, false on failure.
  */
 bool aurora_dvd_open(const char* disc_path);
+
+/**
+ * Read a GC/Wii disc image ID without changing the active DVD state.
+ * Returns true on success, false on failure.
+ */
+bool aurora_dvd_get_disk_id(const char* disc_path, DVDDiskID* out_id);
 
 /**
  * Close the disc image and free all resources.

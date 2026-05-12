@@ -119,6 +119,9 @@ struct SDL_Gamepad;
 
 BOOL PADInit();
 u32 PADRead(PADStatus* status);
+#if defined(__SWITCH__)
+u32 PADReadRaw(PADStatus* status);
+#endif
 BOOL PADReset(u32 mask);
 BOOL PADRecalibrate(u32 mask);
 void PADClamp(PADStatus* status);

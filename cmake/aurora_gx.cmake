@@ -2,7 +2,6 @@ add_library(aurora_gx STATIC
         lib/gfx/clear.cpp
         lib/gfx/common.cpp
         lib/gfx/depth_peek.cpp
-        lib/gfx/pipeline_cache.cpp
         lib/gfx/dds_io.cpp
         lib/gfx/tex_copy_conv.cpp
         lib/gfx/tex_palette_conv.cpp
@@ -35,9 +34,17 @@ add_library(aurora_gx STATIC
         lib/dolphin/gx/GXVert.cpp
         lib/dolphin/gx/GXAurora.cpp
 )
+if (AURORA_ENABLE_GPU_CACHE)
+    target_sources(aurora_gx PRIVATE lib/gfx/pipeline_cache.cpp)
+else ()
+    target_sources(aurora_gx PRIVATE lib/gfx/pipeline_cache_memory.cpp)
+endif ()
 add_library(aurora::gx ALIAS aurora_gx)
 set_target_properties(aurora_gx PROPERTIES FOLDER "aurora")
 
 target_link_libraries(aurora_gx PUBLIC aurora::core xxhash)
-target_link_libraries(aurora_gx PRIVATE absl::btree absl::flat_hash_map dawn::webgpu_dawn sqlite3 TracyClient)
+target_link_libraries(aurora_gx PRIVATE absl::btree absl::flat_hash_map dawn::webgpu_dawn TracyClient)
+if (AURORA_ENABLE_GPU_CACHE)
+    target_link_libraries(aurora_gx PRIVATE sqlite3)
+endif ()
 target_compile_definitions(aurora_gx PRIVATE WEBGPU_DAWN)

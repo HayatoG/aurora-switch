@@ -3,9 +3,11 @@
 #ifdef AURORA_ENABLE_GX
 #include "gfx/common.hpp"
 #include "gx/fifo.hpp"
-#include "imgui.hpp"
 #include "webgpu/gpu.hpp"
 #include <webgpu/webgpu_cpp.h>
+#endif
+#ifdef AURORA_ENABLE_IMGUI
+#include "imgui.hpp"
 #endif
 
 #ifdef AURORA_ENABLE_RMLUI
@@ -16,7 +18,10 @@
 #include "internal.hpp"
 #include "window.hpp"
 
+#if !defined(__SWITCH__)
 #include <SDL3/SDL_filesystem.h>
+#endif
+#include <chrono>
 #include <magic_enum.hpp>
 
 #include "tracy/Tracy.hpp"
@@ -28,6 +33,65 @@ char g_gameName[4];
 
 namespace {
 Module Log("aurora");
+
+#if defined(__SWITCH__)
+const char* SDL_GetError() {
+  return "Switch standalone backend";
+}
+#endif
+
+#if defined(__SWITCH__) && defined(AURORA_ENABLE_GX)
+using SwitchProfileClock = std::chrono::steady_clock;
+
+static double elapsed_ms(SwitchProfileClock::time_point start, SwitchProfileClock::time_point end) {
+  return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+struct SwitchAuroraEndFrameProfile {
+  uint32_t frames = 0;
+  double total = 0.0;
+  double fifoDrain = 0.0;
+  double gfxEnd = 0.0;
+  double render = 0.0;
+  double rml = 0.0;
+  double copyPass = 0.0;
+  double finish = 0.0;
+  double submit = 0.0;
+  double afterSubmit = 0.0;
+  double present = 0.0;
+};
+
+static SwitchAuroraEndFrameProfile g_switchAuroraEndFrameProfile;
+
+static void record_switch_aurora_end_frame_profile(double total, double fifoDrain, double gfxEnd, double render,
+                                                   double rml, double copyPass, double finish, double submit,
+                                                   double afterSubmit, double present) {
+  constexpr uint32_t LogEveryFrames = 300;
+  auto& profile = g_switchAuroraEndFrameProfile;
+  profile.frames++;
+  profile.total += total;
+  profile.fifoDrain += fifoDrain;
+  profile.gfxEnd += gfxEnd;
+  profile.render += render;
+  profile.rml += rml;
+  profile.copyPass += copyPass;
+  profile.finish += finish;
+  profile.submit += submit;
+  profile.afterSubmit += afterSubmit;
+  profile.present += present;
+
+  if (profile.frames < LogEveryFrames) {
+    return;
+  }
+
+  const double inv = 1.0 / static_cast<double>(profile.frames);
+  Log.info("[SwitchProfile][aurora_end] avg_ms total={:.3f} fifo={:.3f} gfxEnd={:.3f} render={:.3f} rml={:.3f} copy={:.3f} finish={:.3f} submit={:.3f} afterSubmit={:.3f} present={:.3f}",
+           profile.total * inv, profile.fifoDrain * inv, profile.gfxEnd * inv, profile.render * inv,
+           profile.rml * inv, profile.copyPass * inv, profile.finish * inv, profile.submit * inv,
+           profile.afterSubmit * inv, profile.present * inv);
+  profile = {};
+}
+#endif
 
 #ifdef AURORA_ENABLE_GX
 // GPU
@@ -78,7 +142,11 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
     g_config.appName = strdup(g_config.appName);
   }
   if (g_config.configPath == nullptr) {
+#if defined(__SWITCH__)
+    g_config.configPath = strdup("sdmc:/aurora");
+#else
     g_config.configPath = SDL_GetPrefPath(nullptr, g_config.appName);
+#endif
   } else {
     g_config.configPath = strdup(g_config.configPath);
   }
@@ -90,7 +158,11 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   }
   ASSERT(window::initialize(), "Error initializing window");
 
+#if defined(__SWITCH__)
+  g_sdlCustomEventsStart = 0x8000;
+#else
   g_sdlCustomEventsStart = SDL_RegisterEvents(2);
+#endif
   ASSERT(g_sdlCustomEventsStart, "Failed to allocate user events: {}", SDL_GetError());
   ASSERT(window::initialize_event_watch(), "Error initializing SDL event watch");
 
@@ -138,11 +210,13 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
 #ifdef AURORA_ENABLE_GX
   gfx::initialize();
 
+#ifdef AURORA_ENABLE_IMGUI
   imgui::create_context();
+#endif
 #endif
   const auto size = window::get_window_size();
   Log.info("Using framebuffer size {}x{} scale {}", size.fb_width, size.fb_height, size.scale);
-#ifdef AURORA_ENABLE_GX
+#ifdef AURORA_ENABLE_IMGUI
   if (g_config.imGuiInitCallback != nullptr) {
     g_config.imGuiInitCallback(&size);
   }
@@ -173,7 +247,9 @@ void shutdown() noexcept {
 #endif
 #ifdef AURORA_ENABLE_GX
   g_currentView = {};
+#ifdef AURORA_ENABLE_IMGUI
   imgui::shutdown();
+#endif
   gfx::shutdown();
   webgpu::shutdown();
 #endif
@@ -235,7 +311,9 @@ bool begin_frame() noexcept {
     }
   }
 
+#ifdef AURORA_ENABLE_IMGUI
   imgui::new_frame(window::get_window_size());
+#endif
   if (!gfx::begin_frame()) {
     g_currentView = {};
     return false;
@@ -247,13 +325,41 @@ bool begin_frame() noexcept {
 void end_frame() noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
+#if defined(__SWITCH__)
+  const auto profileStart = SwitchProfileClock::now();
+  auto profileStepStart = profileStart;
+  double profileFifoDrain = 0.0;
+  double profileGfxEnd = 0.0;
+  double profileRender = 0.0;
+  double profileRml = 0.0;
+  double profileCopyPass = 0.0;
+  double profileFinish = 0.0;
+  double profileSubmit = 0.0;
+  double profileAfterSubmit = 0.0;
+  double profilePresent = 0.0;
+#endif
   gx::fifo::drain();
+#if defined(__SWITCH__)
+  auto profileNow = SwitchProfileClock::now();
+  profileFifoDrain = elapsed_ms(profileStepStart, profileNow);
+  profileStepStart = profileNow;
+#endif
   const auto encoderDescriptor = wgpu::CommandEncoderDescriptor{
       .label = "Redraw encoder",
   };
   auto encoder = g_device.CreateCommandEncoder(&encoderDescriptor);
   gfx::end_frame(encoder);
+#if defined(__SWITCH__)
+  profileNow = SwitchProfileClock::now();
+  profileGfxEnd = elapsed_ms(profileStepStart, profileNow);
+  profileStepStart = profileNow;
+#endif
   gfx::render(encoder);
+#if defined(__SWITCH__)
+  profileNow = SwitchProfileClock::now();
+  profileRender = elapsed_ms(profileStepStart, profileNow);
+  profileStepStart = profileNow;
+#endif
   {
     window::SurfaceLock surfaceLock;
     if (window::is_presentable() && g_surface && g_currentView) {
@@ -264,7 +370,13 @@ void end_frame() noexcept {
       wgpu::BindGroup presentBindGroup = webgpu::g_CopyBindGroup;
     #if AURORA_ENABLE_RMLUI
       if (rmlui::is_initialized()) {
+      #if defined(__SWITCH__)
+        const auto profileRmlStart = SwitchProfileClock::now();
+      #endif
         const auto rmlOutput = rmlui::render(encoder, viewport);
+      #if defined(__SWITCH__)
+        profileRml += elapsed_ms(profileRmlStart, SwitchProfileClock::now());
+      #endif
         if (rmlOutput.texture != nullptr) {
           presentBindGroup = rmlOutput.copyBindGroup;
         }
@@ -292,6 +404,12 @@ void end_frame() noexcept {
         pass.Draw(3);
         pass.End();
       }
+#if defined(__SWITCH__)
+      profileNow = SwitchProfileClock::now();
+      profileCopyPass = elapsed_ms(profileStepStart, profileNow) - profileRml;
+      profileStepStart = profileNow;
+#endif
+#if defined(AURORA_ENABLE_IMGUI) && !defined(AURORA_PLATFORM_SWITCH)
       {
         const std::array attachments{
             wgpu::RenderPassColorAttachment{
@@ -311,16 +429,37 @@ void end_frame() noexcept {
         imgui::render(pass);
         pass.End();
       }
+#endif
     } else {
       Log.info("Skipping present; window not presentable");
       webgpu::release_surface();
     }
     const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Redraw command buffer"};
     const auto buffer = encoder.Finish(&cmdBufDescriptor);
+#if defined(__SWITCH__)
+    profileNow = SwitchProfileClock::now();
+    profileFinish = elapsed_ms(profileStepStart, profileNow);
+    profileStepStart = profileNow;
+#endif
     g_queue.Submit(1, &buffer);
+#if defined(__SWITCH__)
+    profileNow = SwitchProfileClock::now();
+    profileSubmit = elapsed_ms(profileStepStart, profileNow);
+    profileStepStart = profileNow;
+#endif
     gfx::after_submit();
+#if defined(__SWITCH__)
+    profileNow = SwitchProfileClock::now();
+    profileAfterSubmit = elapsed_ms(profileStepStart, profileNow);
+    profileStepStart = profileNow;
+#endif
     if (window::is_presentable() && g_surface) {
       auto presentStatus = g_surface.Present();
+#if defined(__SWITCH__)
+      profileNow = SwitchProfileClock::now();
+      profilePresent = elapsed_ms(profileStepStart, profileNow);
+      profileStepStart = profileNow;
+#endif
       if (presentStatus != wgpu::Status::Success) {
         Log.warn("Surface present failed: {}", static_cast<int>(presentStatus));
         webgpu::release_surface();
@@ -330,6 +469,11 @@ void end_frame() noexcept {
     }
     g_currentView = {};
   }
+#if defined(__SWITCH__)
+  record_switch_aurora_end_frame_profile(elapsed_ms(profileStart, SwitchProfileClock::now()), profileFifoDrain,
+                                         profileGfxEnd, profileRender, profileRml, profileCopyPass, profileFinish,
+                                         profileSubmit, profileAfterSubmit, profilePresent);
+#endif
 
   TracyPlotConfig("aurora: lastVertSize", tracy::PlotFormatType::Memory, false, true, 0);
   TracyPlotConfig("aurora: lastUniformSize", tracy::PlotFormatType::Memory, false, true, 0);

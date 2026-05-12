@@ -5,16 +5,22 @@
 #include <RmlUi/Core/Core.h>
 #include <RmlUi/Core/DecorationTypes.h>
 
+#ifndef AURORA_PLATFORM_SWITCH
 #include <SDL3/SDL_iostream.h>
 #include <SDL3/SDL_surface.h>
+#else
+#include <png.h>
+#endif
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include "../logging.hpp"
 #include "../webgpu/gpu.hpp"
@@ -48,6 +54,61 @@ struct CompiledShaderData {
 };
 
 Image get_image(const Rml::String& source) {
+#ifdef AURORA_PLATFORM_SWITCH
+  FileInterface_SDL fileInterface;
+  const Rml::FileHandle file = fileInterface.Open(source);
+  if (file == Rml::FileHandle{}) {
+    return {};
+  }
+
+  const size_t encodedSize = fileInterface.Length(file);
+  if (encodedSize == 0) {
+    fileInterface.Close(file);
+    return {};
+  }
+
+  std::vector<uint8_t> encoded(encodedSize);
+  const size_t bytesRead = fileInterface.Read(encoded.data(), encoded.size(), file);
+  fileInterface.Close(file);
+  if (bytesRead != encoded.size()) {
+    Log.warn("Failed to read image '{}': read {} of {} bytes", source, bytesRead, encoded.size());
+    return {};
+  }
+
+  png_image image{};
+  image.version = PNG_IMAGE_VERSION;
+  if (png_image_begin_read_from_memory(&image, encoded.data(), encoded.size()) == 0) {
+    Log.warn("Failed to decode PNG header '{}': {}", source, image.message);
+    return {};
+  }
+
+  image.format = PNG_FORMAT_RGBA;
+  const size_t decodedSize = PNG_IMAGE_SIZE(image);
+  auto ptr = std::make_unique<uint8_t[]>(decodedSize);
+  if (png_image_finish_read(&image, nullptr, ptr.get(), 0, nullptr) == 0) {
+    Log.warn("Failed to decode PNG '{}': {}", source, image.message);
+    png_image_free(&image);
+    return {};
+  }
+
+  for (size_t i = 0; i < decodedSize; i += 4) {
+    const uint8_t alpha = ptr[i + 3];
+    for (size_t channel = 0; channel < 3; ++channel) {
+      ptr[i + channel] =
+          static_cast<uint8_t>((static_cast<uint32_t>(ptr[i + channel]) * static_cast<uint32_t>(alpha)) / 255);
+    }
+  }
+
+  const uint32_t iconWidth = image.width;
+  const uint32_t iconHeight = image.height;
+  png_image_free(&image);
+  return Image{
+      .data = std::move(ptr),
+      .size = decodedSize,
+      .width = iconWidth,
+      .height = iconHeight,
+  };
+#else
   FileInterface_SDL fileInterface;
   const Rml::FileHandle file = fileInterface.Open(source);
   if (file == Rml::FileHandle{}) {
@@ -96,6 +157,27 @@ Image get_image(const Rml::String& source) {
       .width = iconWidth,
       .height = iconHeight,
   };
+#endif
+}
+
+wgpu::Buffer create_mapped_buffer(const char* label, wgpu::BufferUsage usage, const void* data, size_t dataSize) {
+  const auto bufferSize = static_cast<uint64_t>(AURORA_ALIGN(std::max<size_t>(dataSize, 4), 4));
+  const wgpu::BufferDescriptor desc{
+      .label = label,
+      .usage = usage,
+      .size = bufferSize,
+      .mappedAtCreation = true,
+  };
+  wgpu::Buffer buffer = webgpu::g_device.CreateBuffer(&desc);
+  auto* dst = static_cast<uint8_t*>(buffer.GetMappedRange(0, bufferSize));
+  if (dst != nullptr) {
+    std::memcpy(dst, data, dataSize);
+    if (bufferSize > dataSize) {
+      std::memset(dst + dataSize, 0, static_cast<size_t>(bufferSize - dataSize));
+    }
+  }
+  buffer.Unmap();
+  return buffer;
 }
 
 void sigma_to_params(float desiredSigma, int& passLevel, float& sigma) {
@@ -156,6 +238,69 @@ Rml::Rectanglei downsample_scissor(Rml::Rectanglei scissor) {
   scissor.p0 = (scissor.p0 + Rml::Vector2i(1)) / 2;
   scissor.p1 = Rml::Math::Max(scissor.p1 / 2, scissor.p0);
   return scissor;
+}
+
+void upload_texture_data(const wgpu::Texture& texture, const uint8_t* data, uint32_t width, uint32_t height) {
+  constexpr uint32_t BytesPerPixel = 4;
+  const wgpu::Extent3D size{
+      .width = width,
+      .height = height,
+      .depthOrArrayLayers = 1,
+  };
+
+#ifdef AURORA_PLATFORM_SWITCH
+  const uint32_t bytesPerRow = width * BytesPerPixel;
+  const uint32_t copyBytesPerRow = AURORA_ALIGN(bytesPerRow, 256);
+  const uint64_t uploadSize = static_cast<uint64_t>(copyBytesPerRow) * height;
+  const wgpu::BufferDescriptor uploadDesc{
+      .label = "RmlUi Texture Upload Buffer",
+      .usage = wgpu::BufferUsage::MapWrite | wgpu::BufferUsage::CopySrc,
+      .size = uploadSize,
+      .mappedAtCreation = true,
+  };
+  wgpu::Buffer uploadBuffer = webgpu::g_device.CreateBuffer(&uploadDesc);
+  auto* dst = static_cast<uint8_t*>(uploadBuffer.GetMappedRange(0, uploadSize));
+  for (uint32_t row = 0; row < height; ++row) {
+    std::memcpy(dst + static_cast<size_t>(row) * copyBytesPerRow,
+                data + static_cast<size_t>(row) * bytesPerRow, bytesPerRow);
+  }
+  uploadBuffer.Unmap();
+
+  const wgpu::TexelCopyBufferInfo src{
+      .layout =
+          {
+              .offset = 0,
+              .bytesPerRow = copyBytesPerRow,
+              .rowsPerImage = height,
+          },
+      .buffer = uploadBuffer,
+  };
+  const wgpu::TexelCopyTextureInfo dstTexture{
+      .texture = texture,
+      .aspect = wgpu::TextureAspect::All,
+  };
+  const wgpu::CommandEncoderDescriptor encoderDesc{
+      .label = "RmlUi Texture Upload Encoder",
+  };
+  wgpu::CommandEncoder encoder = webgpu::g_device.CreateCommandEncoder(&encoderDesc);
+  encoder.CopyBufferToTexture(&src, &dstTexture, &size);
+  const wgpu::CommandBufferDescriptor cmdDesc{
+      .label = "RmlUi Texture Upload",
+  };
+  const wgpu::CommandBuffer cmd = encoder.Finish(&cmdDesc);
+  webgpu::g_queue.Submit(1, &cmd);
+#else
+  const wgpu::TexelCopyTextureInfo dst{
+      .texture = texture,
+      .aspect = wgpu::TextureAspect::All,
+  };
+  const wgpu::TexelCopyBufferLayout layout{
+      .offset = 0,
+      .bytesPerRow = width * BytesPerPixel,
+      .rowsPerImage = height,
+  };
+  webgpu::g_queue.WriteTexture(&dst, data, width * BytesPerPixel * height, &layout, &size);
+#endif
 }
 
 wgpu::ComputeState compile_shader(const std::string_view& wgslSource, const std::string_view& label) {
@@ -572,6 +717,13 @@ inline constexpr uint64_t UniformBufferSize = 1048576; // 1mb
 Rml::CompiledGeometryHandle WebGPURenderInterface::CompileGeometry(Rml::Span<const Rml::Vertex> vertices,
                                                                    Rml::Span<const int> indices) {
   auto* geometryData = new ShaderGeometryData();
+#ifdef AURORA_PLATFORM_SWITCH
+  geometryData->m_vertexBuffer =
+      create_mapped_buffer("RmlUi Vertex Buffer", wgpu::BufferUsage::Vertex, vertices.data(),
+                           sizeof(Rml::Vertex) * vertices.size());
+  geometryData->m_indexBuffer =
+      create_mapped_buffer("RmlUi Index Buffer", wgpu::BufferUsage::Index, indices.data(), sizeof(int) * indices.size());
+#else
   const wgpu::BufferDescriptor vtxBufferDesc{
       .label = "RmlUi Vertex Buffer",
       .usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::Vertex,
@@ -587,6 +739,7 @@ Rml::CompiledGeometryHandle WebGPURenderInterface::CompileGeometry(Rml::Span<con
   };
   geometryData->m_indexBuffer = webgpu::g_device.CreateBuffer(&idxBufferDesc);
   webgpu::g_queue.WriteBuffer(geometryData->m_indexBuffer, 0, indices.data(), sizeof(int) * indices.size());
+#endif
 
   return reinterpret_cast<Rml::CompiledGeometryHandle>(geometryData);
 }
@@ -613,11 +766,13 @@ void WebGPURenderInterface::DrawGeometry(Rml::CompiledGeometryHandle geometry, R
   m_pass.SetIndexBuffer(geometryData->m_indexBuffer, wgpu::IndexFormat::Uint32, 0,
                         geometryData->m_indexBuffer.GetSize());
   m_pass.SetPipeline(pipeline);
-  m_pass.SetBindGroup(0, m_commonBindGroup, 1, &m_uniformCurrentOffset);
+  m_pass.SetBindGroup(0, m_drawCommonBindGroup ? m_drawCommonBindGroup : m_commonBindGroup, 1, &m_drawUniformOffset);
   m_pass.SetBindGroup(1, textureData->m_bindGroup);
   m_pass.DrawIndexed(geometryData->m_indexBuffer.GetSize() / sizeof(int));
 
+#ifndef AURORA_PLATFORM_SWITCH
   m_uniformCurrentOffset += AURORA_ALIGN(sizeof(UniformBlock), 256);
+#endif
 }
 
 void WebGPURenderInterface::ReleaseGeometry(Rml::CompiledGeometryHandle geometry) {
@@ -639,6 +794,10 @@ Rml::TextureHandle WebGPURenderInterface::LoadTexture(Rml::Vector2i& dimensions,
 
 Rml::TextureHandle WebGPURenderInterface::GenerateTexture(Rml::Span<const Rml::byte> source,
                                                           Rml::Vector2i source_dimensions) {
+  if (source_dimensions.x <= 0 || source_dimensions.y <= 0 || source.size() == 0) {
+    return 0;
+  }
+
   auto* texData = new ShaderTextureData();
   const wgpu::Extent3D size{
       .width = static_cast<uint32_t>(source_dimensions.x),
@@ -654,19 +813,59 @@ Rml::TextureHandle WebGPURenderInterface::GenerateTexture(Rml::Span<const Rml::b
   };
   texData->m_texture = webgpu::g_device.CreateTexture(&textureDesc);
   texData->m_textureView = texData->m_texture.CreateView(nullptr);
-
+#ifdef AURORA_PLATFORM_SWITCH
   constexpr uint32_t BytesPerPixel = 4;
-  const wgpu::TexelCopyTextureInfo dst{
+  const uint32_t bytesPerRow = size.width * BytesPerPixel;
+  const uint32_t copyBytesPerRow = AURORA_ALIGN(bytesPerRow, 256);
+  const uint64_t uploadSize = static_cast<uint64_t>(copyBytesPerRow) * size.height;
+  const wgpu::BufferDescriptor uploadDesc{
+      .label = "RmlUi Texture Upload Buffer",
+      .usage = wgpu::BufferUsage::MapWrite | wgpu::BufferUsage::CopySrc,
+      .size = uploadSize,
+      .mappedAtCreation = true,
+  };
+  wgpu::Buffer uploadBuffer = webgpu::g_device.CreateBuffer(&uploadDesc);
+  auto* dst = static_cast<uint8_t*>(uploadBuffer.GetMappedRange(0, uploadSize));
+  if (dst != nullptr) {
+    for (uint32_t row = 0; row < size.height; ++row) {
+      std::memcpy(dst + static_cast<size_t>(row) * copyBytesPerRow,
+                  source.data() + static_cast<size_t>(row) * bytesPerRow, bytesPerRow);
+      if (copyBytesPerRow > bytesPerRow) {
+        std::memset(dst + static_cast<size_t>(row) * copyBytesPerRow + bytesPerRow, 0, copyBytesPerRow - bytesPerRow);
+      }
+    }
+  }
+  uploadBuffer.Unmap();
+
+  const wgpu::TexelCopyBufferInfo src{
+      .layout =
+          {
+              .offset = 0,
+              .bytesPerRow = copyBytesPerRow,
+              .rowsPerImage = size.height,
+          },
+      .buffer = uploadBuffer,
+  };
+  const wgpu::TexelCopyTextureInfo dstTexture{
       .texture = texData->m_texture,
       .aspect = wgpu::TextureAspect::All,
   };
-  const wgpu::TexelCopyBufferLayout layout{
-      .offset = 0,
-      .bytesPerRow = static_cast<uint32_t>(source_dimensions.x) * BytesPerPixel,
-      .rowsPerImage = static_cast<uint32_t>(source_dimensions.y),
-  };
-  webgpu::g_queue.WriteTexture(&dst, source.data(), source_dimensions.x * BytesPerPixel * source_dimensions.y, &layout,
-                               &size);
+  if (m_encoder != nullptr) {
+    EndActivePass();
+    m_encoder.CopyBufferToTexture(&src, &dstTexture, &size);
+    m_frameUploadBuffers.push_back(uploadBuffer);
+  } else {
+    m_pendingTextureUploads.push_back({
+        .buffer = uploadBuffer,
+        .texture = texData->m_texture,
+        .size = size,
+        .bytesPerRow = copyBytesPerRow,
+        .rowsPerImage = size.height,
+    });
+  }
+#else
+  upload_texture_data(texData->m_texture, source.data(), size.width, size.height);
+#endif
 
   const std::array bindGroupEntries{
       wgpu::BindGroupEntry{
@@ -735,6 +934,13 @@ Rml::Rectanglei WebGPURenderInterface::GetActiveScissorRegion() const {
 }
 
 void WebGPURenderInterface::EnableClipMask(bool enable) {
+  if constexpr (!EnableClipMaskStencil) {
+    (void)enable;
+    m_clipMaskEnabled = false;
+    m_stencilRef = 0;
+    return;
+  }
+
   m_clipMaskEnabled = enable;
   if (!enable) {
     m_stencilRef = 0;
@@ -748,6 +954,13 @@ void WebGPURenderInterface::EnableClipMask(bool enable) {
 
 void WebGPURenderInterface::RenderToClipMask(Rml::ClipMaskOperation operation, Rml::CompiledGeometryHandle geometry,
                                              Rml::Vector2f translation) {
+  if constexpr (!EnableClipMaskStencil) {
+    (void)operation;
+    (void)geometry;
+    (void)translation;
+    return;
+  }
+
   EnsureActiveLayerPass("RmlUi resumed clip mask layer pass");
   if (m_pass == nullptr) {
     return;
@@ -943,7 +1156,9 @@ void WebGPURenderInterface::BeginRenderTargetPass(const wgpu::TextureView& view,
   m_pass = m_encoder.BeginRenderPass(&renderPassDesc);
   ApplyViewport();
   ApplyScissorRegion();
-  m_pass.SetStencilReference(m_stencilRef);
+  if constexpr (EnableClipMaskStencil) {
+    m_pass.SetStencilReference(m_stencilRef);
+  }
 }
 
 void WebGPURenderInterface::BeginLayerPass(Rml::LayerHandle layer, wgpu::LoadOp loadOp, const char* label,
@@ -962,22 +1177,29 @@ void WebGPURenderInterface::BeginLayerPass(Rml::LayerHandle layer, wgpu::LoadOp 
           .clearValue = {0.f, 0.f, 0.f, 0.f},
       },
   };
-  const wgpu::RenderPassDepthStencilAttachment depthStencilAttachment{
-      .view = GetClipMaskStencilView(m_frameSize),
-      .stencilLoadOp = clearStencil ? wgpu::LoadOp::Clear : wgpu::LoadOp::Load,
-      .stencilStoreOp = wgpu::StoreOp::Store,
-      .stencilClearValue = 0,
-  };
+  wgpu::RenderPassDepthStencilAttachment depthStencilAttachment{};
+  const wgpu::RenderPassDepthStencilAttachment* depthStencilAttachmentPtr = nullptr;
+  if constexpr (EnableClipMaskStencil) {
+    depthStencilAttachment = {
+        .view = GetClipMaskStencilView(m_frameSize),
+        .stencilLoadOp = clearStencil ? wgpu::LoadOp::Clear : wgpu::LoadOp::Load,
+        .stencilStoreOp = wgpu::StoreOp::Store,
+        .stencilClearValue = 0,
+    };
+    depthStencilAttachmentPtr = &depthStencilAttachment;
+  }
   const wgpu::RenderPassDescriptor renderPassDesc{
       .label = label,
       .colorAttachmentCount = attachments.size(),
       .colorAttachments = attachments.data(),
-      .depthStencilAttachment = &depthStencilAttachment,
+      .depthStencilAttachment = depthStencilAttachmentPtr,
   };
   m_pass = m_encoder.BeginRenderPass(&renderPassDesc);
   ApplyViewport();
   ApplyScissorRegion();
-  m_pass.SetStencilReference(m_stencilRef);
+  if constexpr (EnableClipMaskStencil) {
+    m_pass.SetStencilReference(m_stencilRef);
+  }
 }
 
 void WebGPURenderInterface::EnsureFrameRenderingStarted() {
@@ -1161,6 +1383,11 @@ void WebGPURenderInterface::RenderBlur(float sigma, const RenderTarget& sourceDe
 }
 
 void WebGPURenderInterface::RenderFilters(Rml::Span<const Rml::CompiledFilterHandle> filters) {
+  if constexpr (!EnableAdvancedFilters) {
+    (void)filters;
+    return;
+  }
+
   constexpr size_t sourceIndex = 0;
   constexpr size_t shadowIndex = 1;
   constexpr size_t tempIndex = 2;
@@ -1276,6 +1503,26 @@ void WebGPURenderInterface::BeginFrame(const wgpu::CommandEncoder& encoder, cons
   m_frameRenderingStarted = false;
 
   NewFrame();
+  if (!m_pendingTextureUploads.empty()) {
+    for (const auto& upload : m_pendingTextureUploads) {
+      const wgpu::TexelCopyBufferInfo src{
+          .layout =
+              {
+                  .offset = 0,
+                  .bytesPerRow = upload.bytesPerRow,
+                  .rowsPerImage = upload.rowsPerImage,
+              },
+          .buffer = upload.buffer,
+      };
+      const wgpu::TexelCopyTextureInfo dstTexture{
+          .texture = upload.texture,
+          .aspect = wgpu::TextureAspect::All,
+      };
+      m_encoder.CopyBufferToTexture(&src, &dstTexture, &upload.size);
+      m_frameUploadBuffers.push_back(upload.buffer);
+    }
+    m_pendingTextureUploads.clear();
+  }
   EnsureFrameTargets(target.size);
   wgpu::Texture multisampleTexture;
   wgpu::TextureView multisampleView;
@@ -1458,6 +1705,10 @@ Rml::TextureHandle WebGPURenderInterface::SaveLayerAsTexture() {
 }
 
 Rml::CompiledFilterHandle WebGPURenderInterface::SaveLayerAsMaskImage() {
+  if constexpr (!EnableAdvancedFilters) {
+    return {};
+  }
+
   if (m_encoder == nullptr) {
     Log.warn("RmlUi requested SaveLayerAsMaskImage outside a frame");
     return {};
@@ -1486,6 +1737,17 @@ Rml::CompiledFilterHandle WebGPURenderInterface::SaveLayerAsMaskImage() {
 
 Rml::CompiledFilterHandle WebGPURenderInterface::CompileFilter(const Rml::String& name,
                                                                const Rml::Dictionary& parameters) {
+  if constexpr (!EnableAdvancedFilters) {
+    static bool logged = false;
+    if (!logged) {
+      Log.info("RmlUi filters are disabled on Switch");
+      logged = true;
+    }
+    (void)name;
+    (void)parameters;
+    return {};
+  }
+
   if (name == "opacity") {
     auto* filter = new CompiledFilter{
         .type = FilterType::Opacity,
@@ -1572,6 +1834,17 @@ void WebGPURenderInterface::ReleaseFilter(Rml::CompiledFilterHandle filter) {
 
 Rml::CompiledShaderHandle WebGPURenderInterface::CompileShader(const Rml::String& name,
                                                                const Rml::Dictionary& parameters) {
+  if constexpr (!EnableCustomShaders) {
+    static bool logged = false;
+    if (!logged) {
+      Log.info("RmlUi custom shaders are disabled on Switch");
+      logged = true;
+    }
+    (void)name;
+    (void)parameters;
+    return {};
+  }
+
   const bool supportedGradient = name == "linear-gradient" || name == "radial-gradient" || name == "conic-gradient";
   if (!supportedGradient) {
     Log.warn("Unsupported RmlUi shader '{}'", name);
@@ -1630,6 +1903,13 @@ Rml::CompiledShaderHandle WebGPURenderInterface::CompileShader(const Rml::String
 
 void WebGPURenderInterface::RenderShader(Rml::CompiledShaderHandle shader, Rml::CompiledGeometryHandle geometry,
                                          Rml::Vector2f translation, Rml::TextureHandle) {
+  if constexpr (!EnableCustomShaders) {
+    (void)shader;
+    (void)geometry;
+    (void)translation;
+    return;
+  }
+
   if (shader == 0 || geometry == 0) {
     return;
   }
@@ -1886,6 +2166,7 @@ void WebGPURenderInterface::CreateDeviceObjects() {
         .stencilReadMask = 0xFF,
         .stencilWriteMask = 0xFF,
     };
+    const wgpu::DepthStencilState* depthStencilStatePtr = EnableClipMaskStencil ? &depthStencilState : nullptr;
     const wgpu::RenderPipelineDescriptor pipelineDesc{
         .label = label,
         .layout = m_pipelineLayout,
@@ -1903,7 +2184,7 @@ void WebGPURenderInterface::CreateDeviceObjects() {
                 .frontFace = wgpu::FrontFace::CW,
                 .cullMode = wgpu::CullMode::None,
             },
-        .depthStencil = &depthStencilState,
+        .depthStencil = depthStencilStatePtr,
         .multisample =
             {
                 .count = LayerSampleCount,
@@ -1944,6 +2225,7 @@ void WebGPURenderInterface::CreateDeviceObjects() {
         .stencilReadMask = 0xFF,
         .stencilWriteMask = 0xFF,
     };
+    const wgpu::DepthStencilState* depthStencilStatePtr = EnableClipMaskStencil ? &depthStencilState : nullptr;
     const wgpu::RenderPipelineDescriptor pipelineDesc{
         .label = label,
         .layout = m_shaderPipelineLayout,
@@ -1961,7 +2243,7 @@ void WebGPURenderInterface::CreateDeviceObjects() {
                 .frontFace = wgpu::FrontFace::CW,
                 .cullMode = wgpu::CullMode::None,
             },
-        .depthStencil = &depthStencilState,
+        .depthStencil = depthStencilStatePtr,
         .multisample =
             {
                 .count = LayerSampleCount,
@@ -1996,6 +2278,8 @@ void WebGPURenderInterface::CreateDeviceObjects() {
         .stencilReadMask = 0xFF,
         .stencilWriteMask = 0xFF,
     };
+    const wgpu::DepthStencilState* depthStencilStatePtr =
+        EnableClipMaskStencil && useStencil ? &depthStencilState : nullptr;
     const wgpu::RenderPipelineDescriptor pipelineDesc{
         .label = label,
         .layout = m_pipelineLayout,
@@ -2008,7 +2292,7 @@ void WebGPURenderInterface::CreateDeviceObjects() {
             {
                 .topology = wgpu::PrimitiveTopology::TriangleList,
             },
-        .depthStencil = useStencil ? &depthStencilState : nullptr,
+        .depthStencil = depthStencilStatePtr,
         .multisample =
             {
                 .count = sampleCount,
@@ -2343,7 +2627,35 @@ void WebGPURenderInterface::SetupRenderState(const Rml::Vector2f& translation) {
       .translation = {translation.x, translation.y, 0.0f, 1.0f},
       .Gamma = m_gamma,
   };
+#ifdef AURORA_PLATFORM_SWITCH
+  wgpu::Buffer uniformBuffer =
+      create_mapped_buffer("RmlUi Draw Uniform Buffer", wgpu::BufferUsage::Uniform, &ubo, sizeof(ubo));
+  const std::array commonBindGroupEntries{
+      wgpu::BindGroupEntry{
+          .binding = 0,
+          .buffer = uniformBuffer,
+          .offset = 0,
+          .size = AURORA_ALIGN(sizeof(UniformBlock), 16),
+      },
+      wgpu::BindGroupEntry{
+          .binding = 1,
+          .sampler = m_sampler,
+      },
+  };
+  const wgpu::BindGroupDescriptor commonBindGroupDescriptor{
+      .layout = m_commonBindGroupLayout,
+      .entryCount = commonBindGroupEntries.size(),
+      .entries = commonBindGroupEntries.data(),
+  };
+  m_frameUploadBuffers.push_back(uniformBuffer);
+  m_frameBindGroups.push_back(webgpu::g_device.CreateBindGroup(&commonBindGroupDescriptor));
+  m_drawCommonBindGroup = m_frameBindGroups.back();
+  m_drawUniformOffset = 0;
+#else
   webgpu::g_queue.WriteBuffer(m_uniformBuffer, m_uniformCurrentOffset, &ubo, sizeof(UniformBlock));
+  m_drawCommonBindGroup = m_commonBindGroup;
+  m_drawUniformOffset = m_uniformCurrentOffset;
+#endif
 
   constexpr wgpu::Color BlendColor{0.f, 0.f, 0.f, 0.f};
   m_pass.SetBlendConstant(&BlendColor);
@@ -2390,6 +2702,10 @@ void WebGPURenderInterface::CreateUniformBuffer() {
 }
 
 void WebGPURenderInterface::NewFrame() {
+  m_frameUploadBuffers.clear();
+  m_frameBindGroups.clear();
+  m_drawCommonBindGroup = nullptr;
+  m_drawUniformOffset = 0;
   m_uniformCurrentOffset = 0;
   m_blurUniformCurrentOffset = 0;
   m_dropShadowUniformCurrentOffset = 0;
@@ -2399,6 +2715,11 @@ void WebGPURenderInterface::NewFrame() {
 }
 
 wgpu::TextureView WebGPURenderInterface::GetClipMaskStencilView(const wgpu::Extent3D& size) {
+  if constexpr (!EnableClipMaskStencil) {
+    (void)size;
+    return {};
+  }
+
   if (m_clipMaskStencilView && m_clipMaskStencilSize == size) {
     return m_clipMaskStencilView;
   }

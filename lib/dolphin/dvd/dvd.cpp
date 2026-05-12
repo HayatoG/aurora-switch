@@ -338,6 +338,48 @@ void cbForPrepareStreamAsync(s32 result, DVDCommandBlock* block) {
 
 extern "C" {
 
+bool aurora_dvd_get_disk_id(const char* disc_path, DVDDiskID* out_id) {
+  if (disc_path == nullptr || out_id == nullptr) {
+    return false;
+  }
+
+  SDL_IOStream* io = SDL_IOFromFile(disc_path, "rb");
+  if (io == nullptr) {
+    return false;
+  }
+
+  const NodDiscStream stream{
+      .user_data = io,
+      .read_at = sdlStreamReadAt,
+      .stream_len = sdlStreamLen,
+      .close = sdlStreamClose,
+  };
+
+  NodHandle* disc = nullptr;
+  const NodResult openResult = nod_disc_open_stream(&stream, nullptr, &disc);
+  if (openResult != NOD_RESULT_OK || disc == nullptr) {
+    sdlStreamClose(io);
+    return false;
+  }
+
+  NodDiscHeader header{};
+  const NodResult headerResult = nod_disc_header(disc, &header);
+  nod_free(disc);
+  if (headerResult != NOD_RESULT_OK) {
+    return false;
+  }
+
+  DVDDiskID diskID{};
+  std::memcpy(diskID.gameName, header.game_id, sizeof(diskID.gameName));
+  std::memcpy(diskID.company, header.game_id + sizeof(diskID.gameName), sizeof(diskID.company));
+  diskID.diskNumber = header.disc_num;
+  diskID.gameVersion = header.disc_version;
+  diskID.streaming = header.audio_streaming;
+  diskID.streamingBufSize = header.audio_stream_buf_size;
+  *out_id = diskID;
+  return true;
+}
+
 bool aurora_dvd_open(const char* disc_path) {
   if (disc_path == nullptr) {
     return false;

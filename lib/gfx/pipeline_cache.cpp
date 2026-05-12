@@ -17,6 +17,9 @@
 #include <absl/container/flat_hash_set.h>
 #include <fmt/format.h>
 #include <tracy/Tracy.hpp>
+#ifdef __SWITCH__
+#include <switch.h>
+#endif
 
 namespace aurora::gfx {
 static Module Log("aurora::gfx::pipeline_cache");
@@ -72,6 +75,23 @@ static bool g_pipelineCacheWriterStop = false;
 
 static std::atomic_ref queuedPipelines{g_stats.queuedPipelines};
 static std::atomic_ref createdPipelines{g_stats.createdPipelines};
+
+#ifdef __SWITCH__
+static void pin_switch_pipeline_thread(int core) {
+  (void)core;
+
+  u64 processMask = 0;
+  u32 affinityMask = 0x7;
+  if (R_SUCCEEDED(svcGetInfo(&processMask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0))) {
+    affinityMask = static_cast<u32>(processMask) & 0x7;
+    if (affinityMask == 0) {
+      affinityMask = 1;
+    }
+  }
+
+  svcSetThreadCoreMask(CUR_THREAD_HANDLE, -1, affinityMask);
+}
+#endif
 
 template <typename PipelineConfig>
 static PipelineCacheWrite make_pipeline_cache_write(ShaderType type, PipelineRef hash, const PipelineConfig& config,
@@ -394,6 +414,9 @@ static void pipeline_cache_writer() {
 #ifdef TRACY_ENABLE
   tracy::SetThreadName("Pipeline cache writer thread");
 #endif
+#ifdef __SWITCH__
+  pin_switch_pipeline_thread(0);
+#endif
 
   while (true) {
     std::deque<PipelineCacheWrite> batch;
@@ -437,6 +460,9 @@ static void pipeline_cache_writer() {
 static void pipeline_worker() {
 #ifdef TRACY_ENABLE
   tracy::SetThreadName("Pipeline compilation thread");
+#endif
+#ifdef __SWITCH__
+  pin_switch_pipeline_thread(1);
 #endif
 
   bool hasMore = false;
