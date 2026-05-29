@@ -14,5 +14,16 @@ if (NOT AURORA_PLATFORM_SWITCH)
 endif ()
 target_link_libraries(aurora_dvd PRIVATE fmt::fmt)
 if (AURORA_PLATFORM_SWITCH)
+  # devkitPro portlibs ship the cross-compiled headers + static libs for these compression deps,
+  # but the Switch.cmake toolchain doesn't put their include dir on the path by default.
+  # Add it explicitly so <bzlib.h>, <lzma.h>, <zstd.h>, <mbedtls/aes.h> resolve.
+  target_include_directories(aurora_dvd PRIVATE
+    "$ENV{DEVKITPRO}/portlibs/switch/include"
+    /opt/devkitpro/portlibs/switch/include
+  )
+  target_link_directories(aurora_dvd PRIVATE
+    "$ENV{DEVKITPRO}/portlibs/switch/lib"
+    /opt/devkitpro/portlibs/switch/lib
+  )
   target_link_libraries(aurora_dvd PRIVATE z zstd bz2 lzma mbedcrypto)
 endif ()

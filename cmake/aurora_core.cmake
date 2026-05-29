@@ -61,6 +61,12 @@ if(AURORA_ENABLE_RMLUI)
         if (NOT AURORA_SWITCH_PNG_LIBRARY)
             message(FATAL_ERROR "aurora: Missing Switch libpng dependency")
         endif ()
+        # WebGPURenderInterface.cpp + others #include <png.h>; portlibs include dir is NOT on
+        # the Switch.cmake toolchain default path, so add it explicitly here as a SYSTEM include
+        # (silences warnings from those headers).
+        target_include_directories(aurora_core SYSTEM PRIVATE
+                "$ENV{DEVKITPRO}/portlibs/switch/include"
+                /opt/devkitpro/portlibs/switch/include)
         target_link_libraries(aurora_core PRIVATE ${AURORA_SWITCH_PNG_LIBRARY})
     endif ()
 endif ()

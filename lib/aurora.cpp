@@ -26,6 +26,11 @@
 
 #include "tracy/Tracy.hpp"
 
+#ifdef __SWITCH__
+#include <cstdio>
+extern "C" void dusk_switch_log(const char*);
+#endif
+
 namespace aurora {
 AuroraConfig g_config;
 uint32_t g_sdlCustomEventsStart;
@@ -268,24 +273,56 @@ const AuroraEvent* update() noexcept {
 
 bool begin_frame() noexcept {
   ZoneScoped;
+#ifdef __SWITCH__
+  {
+    static unsigned bf_iter = 0;
+    if (bf_iter < 10) {
+      char b[80];
+      std::snprintf(b, sizeof b, "[aurora] begin_frame iter=%u\n", bf_iter);
+      dusk_switch_log(b);
+    }
+    ++bf_iter;
+  }
+#endif
 #ifdef AURORA_ENABLE_GX
   {
     window::SurfaceLock surfaceLock;
     if (!window::is_presentable()) {
       webgpu::release_surface();
+#ifdef __SWITCH__
+      { dusk_switch_log("[aurora] begin_frame -> !is_presentable\n"); }
+#endif
       return false;
     }
     if (window::is_paused()) {
+#ifdef __SWITCH__
+      { dusk_switch_log("[aurora] begin_frame -> is_paused\n"); }
+#endif
       return false;
     }
     if (!g_surface) {
       webgpu::refresh_surface(true);
       if (!g_surface) {
+#ifdef __SWITCH__
+        { dusk_switch_log("[aurora] begin_frame -> !g_surface (refresh failed)\n"); }
+#endif
         return false;
       }
     }
     wgpu::SurfaceTexture surfaceTexture;
     g_surface.GetCurrentTexture(&surfaceTexture);
+#ifdef __SWITCH__
+    {
+      static unsigned gt_iter = 0;
+      if (gt_iter < 10) {
+        char b[96];
+        std::snprintf(b, sizeof b, "[aurora] begin_frame GetCurrentTexture status=%d iter=%u\n",
+                      (int)surfaceTexture.status, gt_iter);
+        dusk_switch_log(b);
+      }
+      ++gt_iter;
+    }
+#endif
     switch (surfaceTexture.status) {
     case wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal:
       g_currentView = surfaceTexture.texture.CreateView();
@@ -324,6 +361,17 @@ bool begin_frame() noexcept {
 
 void end_frame() noexcept {
   ZoneScoped;
+#ifdef __SWITCH__
+  {
+    static unsigned ef_iter = 0;
+    if (ef_iter < 10) {
+      char b[80];
+      std::snprintf(b, sizeof b, "[aurora] end_frame iter=%u entry\n", ef_iter);
+      dusk_switch_log(b);
+    }
+    ++ef_iter;
+  }
+#endif
 #ifdef AURORA_ENABLE_GX
 #if defined(__SWITCH__)
   const auto profileStart = SwitchProfileClock::now();
@@ -454,7 +502,17 @@ void end_frame() noexcept {
     profileStepStart = profileNow;
 #endif
     if (window::is_presentable() && g_surface) {
+#ifdef __SWITCH__
+      { static unsigned p_iter = 0;
+        if (p_iter < 10) { char b[80]; std::snprintf(b, sizeof b, "[aurora] g_surface.Present iter=%u\n", p_iter); dusk_switch_log(b); }
+        ++p_iter; }
+#endif
       auto presentStatus = g_surface.Present();
+#ifdef __SWITCH__
+      { static unsigned pp_iter = 0;
+        if (pp_iter < 10) { char b[80]; std::snprintf(b, sizeof b, "[aurora] g_surface.Present iter=%u status=%d\n", pp_iter, (int)presentStatus); dusk_switch_log(b); }
+        ++pp_iter; }
+#endif
 #if defined(__SWITCH__)
       profileNow = SwitchProfileClock::now();
       profilePresent = elapsed_ms(profileStepStart, profileNow);

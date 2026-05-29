@@ -13,6 +13,9 @@
 #include <vector>
 
 #include <switch.h>
+#include <cstdio>
+
+extern "C" void dusk_switch_log(const char*);
 
 namespace aurora::window {
 namespace {
@@ -165,11 +168,74 @@ const AuroraEvent* poll_events() {
   g_events.clear();
   input::set_mouse_scroll(0, 0);
 
+  static unsigned poll_count = 0;
+  static bool exit_logged = false;
+  bool was_exit = g_exitRequested;
   if (!g_exitRequested && !appletMainLoop()) {
     g_exitRequested = true;
   }
+  if (poll_count < 8) {
+    char b[128];
+    std::snprintf(b, sizeof b, "[poll] iter=%u exitReq=%d->%d\n",
+                  poll_count, (int)was_exit, (int)g_exitRequested);
+    ::dusk_switch_log(b);
+  } else if (g_exitRequested && !exit_logged) {
+    char b[128];
+    std::snprintf(b, sizeof b, "[poll] late exit iter=%u\n", poll_count);
+    ::dusk_switch_log(b);
+    exit_logged = true;
+  }
+  ++poll_count;
 
   padUpdate(&g_pad);
+
+  // Translate libnx button transitions (down/up this frame) into SDL gamepad
+  // events so the Dusk launcher RmlUi navigation receives input. The in-game
+  // PADRead() pipeline reads directly from libnx state and is unaffected.
+  {
+    const u64 down = padGetButtonsDown(&g_pad);
+    const u64 up   = padGetButtonsUp(&g_pad);
+    struct ButMap { u64 nx; Uint8 sdl; };
+    static constexpr ButMap kMap[] = {
+        // Nintendo: A=confirm (right), B=cancel (bottom). Map to SDL semantic
+        // equivalents — Dusk's input.cpp treats SOUTH as KI_RETURN (confirm)
+        // and EAST as KI_ESCAPE (cancel) regardless of physical position.
+        { HidNpadButton_A,        SDL_GAMEPAD_BUTTON_SOUTH }, // Switch A → confirm
+        { HidNpadButton_B,        SDL_GAMEPAD_BUTTON_EAST  }, // Switch B → cancel
+        { HidNpadButton_X,        SDL_GAMEPAD_BUTTON_NORTH },
+        { HidNpadButton_Y,        SDL_GAMEPAD_BUTTON_WEST  },
+        { HidNpadButton_Plus,     SDL_GAMEPAD_BUTTON_START },
+        { HidNpadButton_Minus,    SDL_GAMEPAD_BUTTON_BACK  },
+        { HidNpadButton_L,        SDL_GAMEPAD_BUTTON_LEFT_SHOULDER },
+        { HidNpadButton_R,        SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER },
+        { HidNpadButton_StickL,   SDL_GAMEPAD_BUTTON_LEFT_STICK },
+        { HidNpadButton_StickR,   SDL_GAMEPAD_BUTTON_RIGHT_STICK },
+        { HidNpadButton_Up,       SDL_GAMEPAD_BUTTON_DPAD_UP },
+        { HidNpadButton_Down,     SDL_GAMEPAD_BUTTON_DPAD_DOWN },
+        { HidNpadButton_Left,     SDL_GAMEPAD_BUTTON_DPAD_LEFT },
+        { HidNpadButton_Right,    SDL_GAMEPAD_BUTTON_DPAD_RIGHT },
+    };
+    for (const auto& m : kMap) {
+      if (down & m.nx) {
+        AuroraEvent ev{};
+        ev.type = AURORA_SDL_EVENT;
+        ev.sdl.gbutton.type = SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+        ev.sdl.gbutton.which = 0;
+        ev.sdl.gbutton.button = m.sdl;
+        ev.sdl.gbutton.down = true;
+        g_events.push_back(ev);
+      }
+      if (up & m.nx) {
+        AuroraEvent ev{};
+        ev.type = AURORA_SDL_EVENT;
+        ev.sdl.gbutton.type = SDL_EVENT_GAMEPAD_BUTTON_UP;
+        ev.sdl.gbutton.which = 0;
+        ev.sdl.gbutton.button = m.sdl;
+        ev.sdl.gbutton.down = false;
+        g_events.push_back(ev);
+      }
+    }
+  }
 
   const auto size = get_window_size();
   if (size != g_windowSize) {

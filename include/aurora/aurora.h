@@ -74,9 +74,16 @@ typedef void (*AuroraImGuiInitCallback)(const AuroraWindowSize* size);
 #define MEM1_DEFAULT_SIZE = 24 * 1024 * 1024;
 #define ARAM_DEFAULT_SIZE = 16 * 1024 * 1024;
 
+typedef enum {
+  SAMPLER_BILINEAR = 0,
+  SAMPLER_AREA = 1,
+} AuroraSampler;
+
 typedef struct {
   const char* appName;
   const char* configPath;
+  const char* userPath;
+  const char* cachePath;
   AuroraBackend desiredBackend;
   uint32_t msaa;
   uint16_t maxTextureAnisotropy;
@@ -127,6 +134,8 @@ void aurora_end_frame();
 void aurora_set_log_level(AuroraLogLevel level);
 void aurora_set_pause_on_focus_lost(bool value);
 void aurora_set_background_input(bool value);
+void aurora_set_resampler(AuroraSampler sampler);
+void aurora_set_texture_replacements_enabled(bool enabled);
 
 AuroraBackend aurora_get_backend();
 const AuroraBackend* aurora_get_available_backends(size_t* count);

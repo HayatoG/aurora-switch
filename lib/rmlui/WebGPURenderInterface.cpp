@@ -1013,8 +1013,18 @@ void WebGPURenderInterface::SetTransform(const Rml::Matrix4f* transform) {
   }
 }
 
+#ifdef __SWITCH__
+extern "C" void dusk_switch_log(const char*);
+#endif
+
 void WebGPURenderInterface::EnsureRenderTarget(RenderTarget& target, const char* label, const wgpu::Extent3D& size,
                                                bool multisampled) {
+#ifdef __SWITCH__
+  { char b[224];
+    std::snprintf(b, sizeof b, "[rmlui] EnsureRenderTarget '%s' w=%u h=%u d=%u ms=%d\n",
+                  label ? label : "?", size.width, size.height, size.depthOrArrayLayers, (int)multisampled);
+    dusk_switch_log(b); }
+#endif
   const bool useMultisampling = multisampled && LayerSampleCount > 1;
   if (target.view && target.size == size && static_cast<bool>(target.multisampleView) == useMultisampling) {
     return;

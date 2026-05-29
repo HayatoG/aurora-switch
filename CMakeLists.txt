@@ -17,6 +17,16 @@ option(AURORA_PLATFORM_SWITCH "Use the libnx/NWindow platform backend instead of
 if (AURORA_PLATFORM_SWITCH)
   set(_aurora_default_imgui OFF)
   set(_aurora_default_gpu_cache OFF)
+  # devkitPro ships every common Switch port-lib (libpng, bzip2, lzma, zstd, mbedtls, etc.) in
+  # /opt/devkitpro/portlibs/switch/{include,lib}, but the Switch.cmake toolchain does NOT add
+  # these dirs to the compile/link path by default. Add them globally so ANY aurora translation
+  # unit that #include <png.h>, <bzlib.h>, <lzma.h>, etc. resolves without per-target plumbing.
+  include_directories(SYSTEM
+    "$ENV{DEVKITPRO}/portlibs/switch/include"
+    /opt/devkitpro/portlibs/switch/include)
+  link_directories(
+    "$ENV{DEVKITPRO}/portlibs/switch/lib"
+    /opt/devkitpro/portlibs/switch/lib)
 else ()
   set(_aurora_default_imgui ON)
   set(_aurora_default_gpu_cache ON)

@@ -106,7 +106,17 @@ wgpu::TextureFormat best_surface_format() {
 
 } // namespace
 
+#ifdef __SWITCH__
+extern "C" void dusk_switch_log(const char*);
+#endif
+
 TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool multisampled) {
+#ifdef __SWITCH__
+  { char b[160];
+    std::snprintf(b, sizeof b, "[aurora] create_render_texture w=%u h=%u msaa=%d\n",
+                  width, height, (int)multisampled);
+    dusk_switch_log(b); }
+#endif
   const wgpu::Extent3D size{
       .width = width,
       .height = height,

@@ -40,6 +40,23 @@ struct SDL_Rect {
 inline const char* SDL_GetError() { return "SDL Switch compatibility stub"; }
 inline int SDL_strcmp(const char* lhs, const char* rhs) { return std::strcmp(lhs, rhs); }
 inline void SDL_free(void* ptr) { std::free(ptr); }
+inline int SDL_AddGamepadMappingsFromFile(const char*) { return 0; }
+inline bool SDL_SetAppMetadata(const char*, const char*, const char*) { return true; }
+
+enum SDL_Folder {
+  SDL_FOLDER_HOME = 0,
+  SDL_FOLDER_DESKTOP,
+  SDL_FOLDER_DOCUMENTS,
+  SDL_FOLDER_DOWNLOADS,
+  SDL_FOLDER_MUSIC,
+  SDL_FOLDER_PICTURES,
+  SDL_FOLDER_PUBLICSHARE,
+  SDL_FOLDER_SAVEDGAMES,
+  SDL_FOLDER_SCREENSHOTS,
+  SDL_FOLDER_TEMPLATES,
+  SDL_FOLDER_VIDEOS,
+};
+inline const char* SDL_GetUserFolder(SDL_Folder) { return nullptr; }
 
 enum SDL_IOStatus {
   SDL_IO_STATUS_READY,
@@ -290,17 +307,15 @@ struct SDL_MouseWheelEvent {
   float y;
 };
 
-struct SDL_Event {
-  union {
-    Uint32 type;
-    SDL_GamepadDeviceEvent gdevice;
-    SDL_GamepadButtonEvent gbutton;
-    SDL_GamepadAxisEvent gaxis;
-    SDL_TouchFingerEvent tfinger;
-    SDL_MouseMotionEvent motion;
-    SDL_MouseButtonEvent button;
-    SDL_MouseWheelEvent wheel;
-  };
+union SDL_Event {
+  Uint32 type;
+  SDL_GamepadDeviceEvent gdevice;
+  SDL_GamepadButtonEvent gbutton;
+  SDL_GamepadAxisEvent gaxis;
+  SDL_TouchFingerEvent tfinger;
+  SDL_MouseMotionEvent motion;
+  SDL_MouseButtonEvent button;
+  SDL_MouseWheelEvent wheel;
 };
 
 enum SDL_GamepadButton {
