@@ -2,6 +2,8 @@
 
 #include "FileInterface_SDL.h"
 
+#include <cstdlib>  // std::getenv for the NVK_TRACE gate
+
 #include <RmlUi/Core/Core.h>
 #include <RmlUi/Core/DecorationTypes.h>
 
@@ -1020,10 +1022,14 @@ extern "C" void dusk_switch_log(const char*);
 void WebGPURenderInterface::EnsureRenderTarget(RenderTarget& target, const char* label, const wgpu::Extent3D& size,
                                                bool multisampled) {
 #ifdef __SWITCH__
-  { char b[224];
-    std::snprintf(b, sizeof b, "[rmlui] EnsureRenderTarget '%s' w=%u h=%u d=%u ms=%d\n",
-                  label ? label : "?", size.width, size.height, size.depthOrArrayLayers, (int)multisampled);
-    dusk_switch_log(b); }
+  // switch-nvk: this fires per-layer per-frame (before the cache-hit early-out below),
+  // so it throttles fps via the SD/nxlink sink. OFF unless NVK_TRACE is set.
+  { static int en = -1;
+    if (en < 0) en = std::getenv("NVK_TRACE") ? 1 : 0;
+    if (en) { char b[224];
+      std::snprintf(b, sizeof b, "[rmlui] EnsureRenderTarget '%s' w=%u h=%u d=%u ms=%d\n",
+                    label ? label : "?", size.width, size.height, size.depthOrArrayLayers, (int)multisampled);
+      dusk_switch_log(b); } }
 #endif
   const bool useMultisampling = multisampled && LayerSampleCount > 1;
   if (target.view && target.size == size && static_cast<bool>(target.multisampleView) == useMultisampling) {
