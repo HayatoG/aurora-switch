@@ -27,6 +27,8 @@ inline void SetThreadName(const char*) {}
 #define TracyPlot(name, value) ((void)0)
 #define FrameMark ((void)0)
 #define FrameMarkNamed(name) ((void)0)
+#define FrameMarkStart(name) ((void)0)
+#define FrameMarkEnd(name) ((void)0)
 #define TracyLockable(type, varname) type varname
 #define TracyLockableN(type, varname, desc) type varname
 #define LockableBase(type) type

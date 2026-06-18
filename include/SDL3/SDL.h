@@ -559,6 +559,40 @@ inline void SDL_ShowOpenFileDialog(SDL_DialogFileCallback callback, void* userda
 
 inline bool SDL_OpenURL(const char*) { return false; }
 
+// ── Audio ──────────────────────────────────────────────────────────────────
+// dusk/audio/DuskAudioSystem.cpp drives audio through these. On Switch they are NOT inline — they
+// are implemented over libnx audren in platforms/switch/src/switch_audio.cpp (the reference build
+// uses SDL3's own audren backend; we mirror just the surface DuskAudioSystem needs).
+#ifndef SDLCALL
+#define SDLCALL
+#endif
+constexpr Uint32 SDL_INIT_AUDIO = 0x00000010u;
+bool SDL_Init(Uint32 flags);
+
+using SDL_AudioFormat = Uint32;
+constexpr SDL_AudioFormat SDL_AUDIO_S16 = 0x8010u;
+constexpr SDL_AudioFormat SDL_AUDIO_S32 = 0x8020u;
+constexpr SDL_AudioFormat SDL_AUDIO_F32 = 0x8120u; // float32, native-endian
+
+struct SDL_AudioSpec {
+  SDL_AudioFormat format;
+  int channels;
+  int freq;
+};
+
+struct SDL_AudioStream; // opaque; defined in switch_audio.cpp
+using SDL_AudioDeviceID = Uint32;
+constexpr SDL_AudioDeviceID SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK = 0xFFFFFFFFu;
+
+using SDL_AudioStreamCallback = void(SDLCALL*)(void* userdata, SDL_AudioStream* stream,
+                                               int additional_amount, int total_amount);
+
+SDL_AudioStream* SDL_OpenAudioDeviceStream(SDL_AudioDeviceID devid, const SDL_AudioSpec* spec,
+                                           SDL_AudioStreamCallback callback, void* userdata);
+bool SDL_PutAudioStreamData(SDL_AudioStream* stream, const void* buf, int len);
+bool SDL_ResumeAudioStreamDevice(SDL_AudioStream* stream);
+bool SDL_PauseAudioStreamDevice(SDL_AudioStream* stream);
+
 struct SDL_Surface {
   int w = 0;
   int h = 0;
