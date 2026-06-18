@@ -6,7 +6,12 @@
 #include <RmlUi/Core.h>
 #include <RmlUi/Core/Element.h>
 #include <RmlUi_Backend.h>
+#ifndef AURORA_PLATFORM_SWITCH
+// rmlui_backends is an INTERFACE target on Switch (no real SDL), so RmlUi_Platform_SDL.{h,cpp} are
+// not built; the header #errors on the undefined RMLUI_SDL_VERSION_MAJOR. The RmlSDL input-
+// translation entry points this file needs are stubbed below for Switch instead.
 #include <RmlUi_Platform_SDL.h>
+#endif
 #include <tracy/Tracy.hpp>
 
 #include "window.hpp"
@@ -23,6 +28,18 @@ FileInterface_SDL* g_fileInterface = nullptr;
 
 namespace {
 Module Log("aurora::rmlui");
+
+#ifdef AURORA_PLATFORM_SWITCH
+// RmlUi_Platform_SDL.cpp isn't compiled on Switch (rmlui_backends is INTERFACE-only), so provide
+// the input-translation entry points aurora's rmlui.cpp calls. On Switch, input is routed through
+// input_switch/window_switch rather than SDL events, so these are inert stubs.
+namespace RmlSDL {
+int GetKeyModifierState() { return 0; }
+int ConvertMouseButton(uint8_t button) { return static_cast<int>(button); }
+bool InputEventHandler(Rml::Context*, SDL_Window*, SDL_Event&) { return false; }
+} // namespace RmlSDL
+#endif
+
 constexpr size_t MaxTrackedTouches = 16;
 
 struct TrackedTouch {

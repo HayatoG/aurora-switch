@@ -61,6 +61,7 @@ struct ImGuiIO {
     bool WantTextInput = false;
     ImGuiConfigFlags ConfigFlags = 0;
     ImVec2 MousePos{-1.0f, -1.0f};
+    ImVec2 MouseDelta{0.0f, 0.0f};
     ImVec2 DisplaySize{0.0f, 0.0f};
     float DeltaTime = 0.0f;
     float Framerate = 0.0f;

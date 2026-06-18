@@ -27,6 +27,26 @@ if (AURORA_PLATFORM_SWITCH)
   link_directories(
     "$ENV{DEVKITPRO}/portlibs/switch/lib"
     /opt/devkitpro/portlibs/switch/lib)
+  # v13's aurora_gx links PNG::PNG (lib/gfx/png_io.cpp for texture replacement). The Switch.cmake
+  # toolchain never runs find_package(PNG), so define an IMPORTED PNG::PNG from the devkitPro
+  # portlib (libpng16.a + zlib) so v13's aurora_gx.cmake resolves unchanged.
+  if (NOT TARGET PNG::PNG)
+    find_library(AURORA_SWITCH_PNG_LIBRARY NAMES png16 png
+      PATHS "$ENV{DEVKITPRO}/portlibs/switch/lib" /opt/devkitpro/portlibs/switch/lib
+      NO_DEFAULT_PATH)
+    find_library(AURORA_SWITCH_ZLIB_LIBRARY NAMES z
+      PATHS "$ENV{DEVKITPRO}/portlibs/switch/lib" /opt/devkitpro/portlibs/switch/lib
+      NO_DEFAULT_PATH)
+    if (NOT AURORA_SWITCH_PNG_LIBRARY)
+      message(FATAL_ERROR "aurora: Missing Switch libpng dependency (portlibs)")
+    endif ()
+    add_library(PNG::PNG STATIC IMPORTED GLOBAL)
+    set_target_properties(PNG::PNG PROPERTIES IMPORTED_LOCATION "${AURORA_SWITCH_PNG_LIBRARY}")
+    if (AURORA_SWITCH_ZLIB_LIBRARY)
+      set_target_properties(PNG::PNG PROPERTIES
+        INTERFACE_LINK_LIBRARIES "${AURORA_SWITCH_ZLIB_LIBRARY}")
+    endif ()
+  endif ()
 else ()
   set(_aurora_default_imgui ON)
   set(_aurora_default_gpu_cache ON)

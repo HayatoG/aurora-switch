@@ -38,6 +38,10 @@ if (AURORA_ENABLE_GX AND AURORA_ENABLE_IMGUI)
     target_compile_definitions(aurora_core PUBLIC AURORA_ENABLE_IMGUI)
     target_sources(aurora_core PRIVATE lib/imgui.cpp)
     target_link_libraries(aurora_core PUBLIC imgui)
+elseif (AURORA_PLATFORM_SWITCH)
+    # GX is on (so aurora.cpp's GX-guarded ImGui calls are compiled in) but ImGui is off here, and
+    # system_info.cpp isn't built on Switch — provide inert stubs so the final link resolves.
+    target_sources(aurora_core PRIVATE lib/switch_aurora_stubs.cpp)
 endif ()
 
 if(AURORA_ENABLE_RMLUI)
@@ -49,6 +53,7 @@ if(AURORA_ENABLE_RMLUI)
             lib/rmlui/WebGPURenderInterface.cpp
             lib/rmlui/SystemInterface_Aurora.cpp
             lib/rmlui/FileInterface_SDL.cpp
+            lib/rmlui/RuntimeTextureProvider.cpp
     )
     target_link_libraries(aurora_core PUBLIC rmlui)
 
@@ -78,7 +83,8 @@ if (AURORA_ENABLE_GX)
     else ()
         set(_aurora_gpu_cache_source lib/webgpu/gpu_cache_null.cpp)
     endif ()
-    target_sources(aurora_core PRIVATE lib/webgpu/gpu.cpp ${_aurora_gpu_cache_source} lib/dawn/BackendBinding.cpp)
+    target_sources(aurora_core PRIVATE lib/webgpu/gpu.cpp ${_aurora_gpu_cache_source} lib/dawn/BackendBinding.cpp
+            lib/webgpu/gpu_prof.cpp lib/dawn/TracyPlatform.cpp)
     target_link_libraries(aurora_core PRIVATE dawn::webgpu_dawn)
     if (AURORA_PLATFORM_SWITCH)
         set(DAWN_SWITCH_NVK_ROOT "/opt/nvk-switch" CACHE PATH

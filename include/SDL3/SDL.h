@@ -237,6 +237,7 @@ enum SDL_EventType : Uint32 {
   SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED,
   SDL_EVENT_WINDOW_MOUSE_LEAVE,
   SDL_EVENT_WINDOW_FOCUS_LOST,
+  SDL_EVENT_WINDOW_FOCUS_GAINED,
   SDL_EVENT_WINDOW_MINIMIZED,
   SDL_EVENT_WINDOW_RESTORED,
   SDL_EVENT_KEY_DOWN,
@@ -317,6 +318,17 @@ union SDL_Event {
   SDL_MouseButtonEvent button;
   SDL_MouseWheelEvent wheel;
 };
+
+// Custom (user) event range starts at SDL_EVENT_USER in real SDL3. aurora registers a small range
+// for its own internal events; we hand out a monotonically increasing base (always non-zero so the
+// caller's success ASSERT passes).
+constexpr Uint32 SDL_EVENT_USER = 0x8000;
+inline Uint32 SDL_RegisterEvents(int numevents) {
+  static Uint32 next = SDL_EVENT_USER;
+  const Uint32 base = next;
+  next += static_cast<Uint32>(numevents > 0 ? numevents : 0);
+  return base;
+}
 
 enum SDL_GamepadButton {
   SDL_GAMEPAD_BUTTON_INVALID = -1,
@@ -501,6 +513,15 @@ inline bool SDL_CaptureMouse(bool) { return true; }
 inline bool SDL_ShowCursor() { return true; }
 inline bool SDL_HideCursor() { return true; }
 
+// Relative-mouse / grab / warp are no-ops on Switch (no desktop mouse). The Switch window never
+// reports SDL_WINDOW_INPUT_FOCUS (SDL_GetWindowFlags returns 0), so dusk's mouse-capture path stays
+// inert — these exist only so dusk/mouse.cpp compiles.
+constexpr Uint32 SDL_WINDOW_INPUT_FOCUS = 0x200u;
+inline bool SDL_GetWindowRelativeMouseMode(SDL_Window*) { return false; }
+inline bool SDL_SetWindowRelativeMouseMode(SDL_Window*, bool) { return true; }
+inline bool SDL_SetWindowMouseGrab(SDL_Window*, bool) { return true; }
+inline void SDL_WarpMouseInWindow(SDL_Window*, float, float) {}
+
 inline bool SDL_GetWindowSafeArea(SDL_Window*, SDL_Rect* rect) {
   if (rect != nullptr) {
     *rect = SDL_Rect{0, 0, 1280, 720};
@@ -545,9 +566,107 @@ struct SDL_Surface {
   void* pixels = nullptr;
 };
 constexpr Uint32 SDL_PIXELFORMAT_RGBA32 = 0;
+
+enum SDL_ScaleMode {
+  SDL_SCALEMODE_INVALID = -1,
+  SDL_SCALEMODE_NEAREST,
+  SDL_SCALEMODE_LINEAR,
+};
+
+using SDL_BlendMode = Uint32;
+constexpr SDL_BlendMode SDL_BLENDMODE_NONE = 0x00000000u;
+constexpr SDL_BlendMode SDL_BLENDMODE_BLEND = 0x00000001u;
+
 inline SDL_Surface* SDL_LoadPNG_IO(SDL_IOStream*, bool closeio) {
   (void)closeio;
   return nullptr;
 }
 inline SDL_Surface* SDL_ConvertSurface(SDL_Surface* surface, Uint32) { return surface; }
-inline void SDL_DestroySurface(SDL_Surface*) {}
+
+// On Switch (no SDL) we back surfaces with a heap RGBA32 pixel buffer so dusk/ui/icon_provider.cpp
+// can compose icons. Only icon_provider creates/destroys surfaces on Switch (window.cpp isn't
+// built; the rmlui PNG path early-returns on the null SDL_LoadPNG_IO), so the create/destroy pair
+// can't double-free.
+inline SDL_Surface* SDL_CreateSurface(int w, int h, Uint32 /*format*/) {
+  if (w <= 0 || h <= 0) {
+    return nullptr;
+  }
+  auto* s = new SDL_Surface{};
+  s->w = w;
+  s->h = h;
+  s->pitch = w * 4; // RGBA32
+  s->pixels = std::calloc(static_cast<size_t>(w) * static_cast<size_t>(h), 4);
+  if (s->pixels == nullptr) {
+    delete s;
+    return nullptr;
+  }
+  return s;
+}
+inline void SDL_DestroySurface(SDL_Surface* surface) {
+  if (surface != nullptr) {
+    std::free(surface->pixels);
+    delete surface;
+  }
+}
+inline bool SDL_MUSTLOCK(SDL_Surface*) { return false; }
+inline bool SDL_LockSurface(SDL_Surface*) { return true; }
+inline void SDL_UnlockSurface(SDL_Surface*) {}
+inline bool SDL_SetSurfaceBlendMode(SDL_Surface*, SDL_BlendMode) { return true; }
+
+// Nearest-neighbour scaled blit with src-over alpha compositing (RGBA32 only). Enough for the
+// layered icon composition in icon_provider; scaleMode is ignored (always nearest).
+inline bool SDL_BlitSurfaceScaled(SDL_Surface* src, const SDL_Rect* srcrect, SDL_Surface* dst,
+                                  const SDL_Rect* dstrect, SDL_ScaleMode) {
+  if (src == nullptr || dst == nullptr || src->pixels == nullptr || dst->pixels == nullptr) {
+    return false;
+  }
+  const int sx = srcrect != nullptr ? srcrect->x : 0;
+  const int sy = srcrect != nullptr ? srcrect->y : 0;
+  const int sw = srcrect != nullptr ? srcrect->w : src->w;
+  const int sh = srcrect != nullptr ? srcrect->h : src->h;
+  const int dx = dstrect != nullptr ? dstrect->x : 0;
+  const int dy = dstrect != nullptr ? dstrect->y : 0;
+  const int dw = dstrect != nullptr ? dstrect->w : dst->w;
+  const int dh = dstrect != nullptr ? dstrect->h : dst->h;
+  if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) {
+    return false;
+  }
+  const auto* srcPixels = static_cast<const Uint8*>(src->pixels);
+  auto* dstPixels = static_cast<Uint8*>(dst->pixels);
+  for (int j = 0; j < dh; ++j) {
+    const int dyPix = dy + j;
+    if (dyPix < 0 || dyPix >= dst->h) {
+      continue;
+    }
+    const int syPix = sy + (j * sh) / dh;
+    if (syPix < 0 || syPix >= src->h) {
+      continue;
+    }
+    for (int i = 0; i < dw; ++i) {
+      const int dxPix = dx + i;
+      if (dxPix < 0 || dxPix >= dst->w) {
+        continue;
+      }
+      const int sxPix = sx + (i * sw) / dw;
+      if (sxPix < 0 || sxPix >= src->w) {
+        continue;
+      }
+      const Uint8* sp = srcPixels + static_cast<size_t>(syPix) * src->pitch + static_cast<size_t>(sxPix) * 4;
+      Uint8* dp = dstPixels + static_cast<size_t>(dyPix) * dst->pitch + static_cast<size_t>(dxPix) * 4;
+      const Uint8 sa = sp[3];
+      if (sa == 0) {
+        continue;
+      }
+      if (sa == 255) {
+        std::memcpy(dp, sp, 4);
+      } else {
+        const int ia = 255 - sa;
+        dp[0] = static_cast<Uint8>((sp[0] * sa + dp[0] * ia) / 255);
+        dp[1] = static_cast<Uint8>((sp[1] * sa + dp[1] * ia) / 255);
+        dp[2] = static_cast<Uint8>((sp[2] * sa + dp[2] * ia) / 255);
+        dp[3] = static_cast<Uint8>(sa + (dp[3] * ia) / 255);
+      }
+    }
+  }
+  return true;
+}

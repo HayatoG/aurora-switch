@@ -18,6 +18,9 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#ifdef __SWITCH__
+#include <pthread.h>
+#endif
 
 #include <SDL3/SDL_iostream.h>
 #include <absl/container/flat_hash_map.h>
@@ -66,6 +69,13 @@ constexpr size_t BuildPipelinesPerFrame = 5;
 constexpr size_t BuildPipelinesPerFrame = 1;
 #endif
 static std::thread g_pipelineThread;
+#ifdef __SWITCH__
+// libnx std::thread stacks are tiny (~32KB). Tint's AnalyzeUniformity recursion during shader
+// compile (pending.create() on the worker) overflows that -> Data Abort. Run the worker on a
+// pthread with an 8MB stack instead.
+static pthread_t g_pipelineThreadNx{};
+static bool g_pipelineThreadNxValid = false;
+#endif
 static std::atomic_bool g_pipelineThreadEnd = false;
 static std::condition_variable g_pipelineQueueCv;
 static std::condition_variable g_pipelineReadyCv;
@@ -726,14 +736,28 @@ static bool prepare_pipeline_cache_db() {
   }
 
   const auto path = fs_path_to_string(std::filesystem::path{g_config.cachePath} / "pipeline_cache.db");
+#ifdef __SWITCH__
+  // libnx FsFs has no POSIX fcntl byte-range locking, so the default "unix" VFS returns
+  // SQLITE_IOERR on the first lock. "unix-none" makes all locking a no-op (single-process app).
+  auto ret = sqlite3_open_v2(path.c_str(), &g_pipelineCacheDb,
+                             SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "unix-none");
+#else
   auto ret = sqlite3_open(path.c_str(), &g_pipelineCacheDb);
+#endif
   if (ret != SQLITE_OK) {
-    Log.error("Failed to open pipeline cache database: {}", sqlite3_errmsg(g_pipelineCacheDb));
+    Log.error("Failed to open pipeline cache database ({}): {}", ret, sqlite3_errmsg(g_pipelineCacheDb));
     pipeline_cache_abort();
     return false;
   }
 
+#ifdef __SWITCH__
+  // WAL is compiled out (SQLITE_OMIT_WAL) and needs shared-memory/mmap newlib lacks; its -wal/-shm
+  // files also need FsFs locking. MEMORY journal keeps rollback in RAM (regenerable cache, no
+  // durability needed); synchronous=OFF skips fsync on FsFs.
+  ret = sqlite::exec(g_pipelineCacheDb, "PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;");
+#else
   ret = sqlite::exec(g_pipelineCacheDb, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+#endif
   if (ret != SQLITE_OK) {
     Log.error("Failed to set pipeline cache pragmas: {}", sqlite3_errmsg(g_pipelineCacheDb));
     pipeline_cache_abort();
@@ -1114,6 +1138,13 @@ PipelineRef find_pipeline(ShaderType type, const rmlui::PipelineConfig& config, 
 }
 #endif
 
+#ifdef __SWITCH__
+static void* pipeline_worker_trampoline(void*) {
+  pipeline_worker();
+  return nullptr;
+}
+#endif
+
 void initialize_pipeline_cache() {
   g_pipelineCacheBroken = false;
   g_pipelineCacheWriterStop = false;
@@ -1124,7 +1155,24 @@ void initialize_pipeline_cache() {
     g_hasPipelineThread = false;
   } else {
     g_hasPipelineThread = true;
+#ifdef __SWITCH__
+    pthread_attr_t attr;
+    bool started = false;
+    if (pthread_attr_init(&attr) == 0) {
+      if (pthread_attr_setstacksize(&attr, 8u * 1024u * 1024u) == 0 &&
+          pthread_create(&g_pipelineThreadNx, &attr, pipeline_worker_trampoline, nullptr) == 0) {
+        g_pipelineThreadNxValid = true;
+        started = true;
+      }
+      pthread_attr_destroy(&attr);
+    }
+    if (!started) {
+      Log.error("Failed to start pipeline worker pthread; falling back to synchronous compile");
+      g_hasPipelineThread = false;
+    }
+#else
     g_pipelineThread = std::thread(pipeline_worker);
+#endif
   }
 
   const size_t loadedCount = load_pipeline_cache();
@@ -1142,7 +1190,14 @@ void shutdown_pipeline_cache() {
     g_pipelineThreadEnd = true;
     g_pipelineQueueCv.notify_all();
     g_pipelineReadyCv.notify_all();
+#ifdef __SWITCH__
+    if (g_pipelineThreadNxValid) {
+      pthread_join(g_pipelineThreadNx, nullptr);
+      g_pipelineThreadNxValid = false;
+    }
+#else
     g_pipelineThread.join();
+#endif
   }
   g_hasPipelineThread = false;
 

@@ -259,7 +259,7 @@ BOOL PADRecalibrate(u32 mask) {
 
 void PADClamp(PADStatus* status) { (void)status; }
 void PADClampCircle(PADStatus* status) { (void)status; }
-void PADControlMotor(s32 chan, u32 cmd) {
+void PADControlMotor(u32 chan, u32 cmd) {
   (void)chan;
   (void)cmd;
 }
@@ -267,10 +267,36 @@ void PADSetSpec(u32 spec) { s_spec = spec; }
 void PADControlAllMotors(const u32* cmdArr) { (void)cmdArr; }
 void PADSetAnalogMode(u32 mode) { s_analogMode = mode; }
 
+// v1.4.1-new PAD entry points used by dusk's touch controls (virtual status), gamepad LED, and
+// controller-config force-rumble UI. The Switch backend doesn't drive HID through these paths, so
+// they are inert stubs (matching the standalone-backend convention of the rest of this file).
+void PADSetVirtualStatus(u32 port, const PADStatus* status) {
+  (void)port;
+  (void)status;
+}
+void PADClearVirtualStatus(u32 port) { (void)port; }
+BOOL PADHasLED(u32 port) {
+  (void)port;
+  return FALSE;
+}
+BOOL PADCanForceDeviceRumble(u32 port) {
+  (void)port;
+  return FALSE;
+}
+BOOL PADGetForceDeviceRumble(u32 port) {
+  (void)port;
+  return FALSE;
+}
+BOOL PADSetForceDeviceRumble(u32 port, BOOL force) {
+  (void)port;
+  (void)force;
+  return FALSE;
+}
+
 #ifdef TARGET_PC
 u32 PADCount() { return 1; }
 const char* PADGetNameForControllerIndex(u32 idx) { return idx == 0 ? "Switch Controller" : nullptr; }
-void PADSetPortForIndex(u32 index, s32 port) {
+void PADSetPortForIndex(u32 index, u32 port) {
   (void)index;
   (void)port;
 }
