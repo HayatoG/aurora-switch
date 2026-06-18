@@ -19,6 +19,7 @@
 #include <tracy/Tracy.hpp>
 #ifdef __SWITCH__
 #include <switch.h>
+#include <pthread.h>
 #endif
 
 namespace aurora::gfx {
@@ -56,6 +57,13 @@ constexpr size_t BuildPipelinesPerFrame = 5;
 constexpr size_t BuildPipelinesPerFrame = 1;
 #endif
 static std::thread g_pipelineThread;
+#ifdef __SWITCH__
+// On Switch the compile worker is created via pthread with an explicit large stack (Tint's
+// recursive uniformity analysis overflows the small default libnx thread stack), so it can't use
+// std::thread above.
+static pthread_t g_pipelineThreadNx{};
+static bool g_pipelineThreadNxValid = false;
+#endif
 static std::atomic_bool g_pipelineThreadEnd = false;
 static std::condition_variable g_pipelineCv;
 static absl::flat_hash_map<PipelineRef, CachedPipeline> g_pipelines;
@@ -235,14 +243,28 @@ static bool prepare_pipeline_cache_db() {
   }
 
   const auto path = (std::filesystem::path{g_config.configPath} / "pipeline_cache.db").string();
+#ifdef __SWITCH__
+  // libnx FsFs has no POSIX file locking -> default unix VFS returns SQLITE_IOERR. Use the
+  // lock-free "unix-none" VFS (single-process cache access is fine).
+  auto ret = sqlite3_open_v2(path.c_str(), &g_pipelineCacheDb, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+                             "unix-none");
+#else
   auto ret = sqlite3_open(path.c_str(), &g_pipelineCacheDb);
+#endif
   if (ret != SQLITE_OK) {
-    Log.error("Failed to open pipeline cache database: {}", sqlite3_errmsg(g_pipelineCacheDb));
+    Log.error("Failed to open pipeline cache database '{}': {} (ret={}, extended={})", path,
+              sqlite3_errmsg(g_pipelineCacheDb), ret,
+              g_pipelineCacheDb != nullptr ? sqlite3_extended_errcode(g_pipelineCacheDb) : -1);
     pipeline_cache_abort();
     return false;
   }
 
+#ifdef __SWITCH__
+  // MEMORY journal: no -journal file, no file locking (FsFs lacks both). Cache is regenerable.
+  ret = sqlite::exec(g_pipelineCacheDb, "PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;");
+#else
   ret = sqlite::exec(g_pipelineCacheDb, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+#endif
   if (ret != SQLITE_OK) {
     Log.error("Failed to set pipeline cache pragmas: {}", sqlite3_errmsg(g_pipelineCacheDb));
     pipeline_cache_abort();
@@ -606,6 +628,30 @@ void initialize_pipeline_cache() {
   g_pipelineFrameActive = false;
   g_pipelineThreadEnd = false;
 
+#ifdef __SWITCH__
+  // Async compile on a worker thread (non-blocking, like the reference) — but Tint's recursive
+  // uniformity analysis overflows the default libnx thread stack (no guard page -> memory
+  // corruption -> the null-deref crash). Create the worker via pthread with a large 8 MB stack so
+  // the recursion fits. Falls back to the synchronous per-frame-budgeted path if creation fails.
+  {
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 8u * 1024u * 1024u);  // 8 MB (default libnx stack is far smaller)
+    const int rc =
+        pthread_create(&g_pipelineThreadNx, &attr, [](void*) -> void* {
+          pipeline_worker();
+          return nullptr;
+        }, nullptr);
+    pthread_attr_destroy(&attr);
+    if (rc == 0) {
+      g_pipelineThreadNxValid = true;
+      g_hasPipelineThread = true;
+    } else {
+      Log.error("pipeline worker pthread_create failed (rc={}); using synchronous compile", rc);
+      g_hasPipelineThread = false;
+    }
+  }
+#else
   if (webgpu::g_backendType == wgpu::BackendType::OpenGL || webgpu::g_backendType == wgpu::BackendType::OpenGLES ||
       webgpu::g_backendType == wgpu::BackendType::WebGPU) {
     g_hasPipelineThread = false;
@@ -613,6 +659,7 @@ void initialize_pipeline_cache() {
     g_hasPipelineThread = true;
     g_pipelineThread = std::thread(pipeline_worker);
   }
+#endif
 
   load_pipeline_cache();
   if (!g_pipelineCacheBroken) {
@@ -624,7 +671,14 @@ void shutdown_pipeline_cache() {
   if (g_hasPipelineThread) {
     g_pipelineThreadEnd = true;
     g_pipelineCv.notify_all();
+#ifdef __SWITCH__
+    if (g_pipelineThreadNxValid) {
+      pthread_join(g_pipelineThreadNx, nullptr);
+      g_pipelineThreadNxValid = false;
+    }
+#else
     g_pipelineThread.join();
+#endif
   }
   g_hasPipelineThread = false;
 

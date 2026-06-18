@@ -93,14 +93,29 @@ static bool cache_init_core() {
 
   std::string file = (std::filesystem::path{g_config.configPath} / "dawn_cache.db").string();
   Log.debug("Using dawn cache at {}", file);
+#ifdef __SWITCH__
+  // libnx FsFs has no POSIX file locking (fcntl F_SETLK), so SQLite's default unix VFS returns
+  // SQLITE_IOERR ("disk I/O error") on the first locking operation. Open with the lock-free
+  // "unix-none" VFS so all locking becomes a no-op (single-process access is fine for our cache).
+  auto ret = sqlite3_open_v2(file.c_str(), &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "unix-none");
+#else
   auto ret = sqlite3_open(file.c_str(), &db);
+#endif
   if (ret != SQLITE_OK) {
-    Log.error("Failed to open database: {}", sqlite3_errmsg(db));
+    Log.error("Failed to open database '{}': {} (ret={}, extended={})", file, sqlite3_errmsg(db), ret,
+              db != nullptr ? sqlite3_extended_errcode(db) : -1);
     return false;
   }
 
+#ifdef __SWITCH__
+  // WAL needs shared-memory/mmap (we build with SQLITE_OMIT_WAL + SQLITE_MAX_MMAP_SIZE=0) and its
+  // -wal/-shm files need locking FsFs lacks. MEMORY journal keeps the rollback journal in RAM
+  // (no journal file, no locking) — durability isn't needed for a regenerable cache.
+  ret = sqlite::exec(db, "PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;");
+#else
   // WAL mode + NORMAL = no need for disk syncs, consistent but not durable is fine.
   ret = sqlite::exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+#endif
   if (ret != SQLITE_OK) {
     Log.error("Failed to set pragmas: {}", sqlite3_errmsg(db));
     return false;
