@@ -2,12 +2,12 @@
 
 #ifdef AURORA_ENABLE_GX
 #include "gfx/common.hpp"
+#include "gfx/render_worker.hpp"
 #include "gx/fifo.hpp"
-#include "webgpu/gpu.hpp"
-#include <webgpu/webgpu_cpp.h>
-#endif
-#ifdef AURORA_ENABLE_IMGUI
 #include "imgui.hpp"
+#include "webgpu/gpu.hpp"
+#include "webgpu/gpu_prof.hpp"
+#include <webgpu/webgpu_cpp.h>
 #endif
 
 #ifdef AURORA_ENABLE_RMLUI
@@ -18,18 +18,11 @@
 #include "internal.hpp"
 #include "window.hpp"
 
-#if !defined(__SWITCH__)
 #include <SDL3/SDL_filesystem.h>
-#endif
-#include <chrono>
 #include <magic_enum.hpp>
 
+#include "system_info.hpp"
 #include "tracy/Tracy.hpp"
-
-#ifdef __SWITCH__
-#include <cstdio>
-extern "C" void dusk_switch_log(const char*);
-#endif
 
 namespace aurora {
 AuroraConfig g_config;
@@ -39,70 +32,28 @@ char g_gameName[4];
 namespace {
 Module Log("aurora");
 
-#if defined(__SWITCH__)
-const char* SDL_GetError() {
-  return "Switch standalone backend";
-}
-#endif
-
-#if defined(__SWITCH__) && defined(AURORA_ENABLE_GX)
-using SwitchProfileClock = std::chrono::steady_clock;
-
-static double elapsed_ms(SwitchProfileClock::time_point start, SwitchProfileClock::time_point end) {
-  return std::chrono::duration<double, std::milli>(end - start).count();
-}
-
-struct SwitchAuroraEndFrameProfile {
-  uint32_t frames = 0;
-  double total = 0.0;
-  double fifoDrain = 0.0;
-  double gfxEnd = 0.0;
-  double render = 0.0;
-  double rml = 0.0;
-  double copyPass = 0.0;
-  double finish = 0.0;
-  double submit = 0.0;
-  double afterSubmit = 0.0;
-  double present = 0.0;
-};
-
-static SwitchAuroraEndFrameProfile g_switchAuroraEndFrameProfile;
-
-static void record_switch_aurora_end_frame_profile(double total, double fifoDrain, double gfxEnd, double render,
-                                                   double rml, double copyPass, double finish, double submit,
-                                                   double afterSubmit, double present) {
-  constexpr uint32_t LogEveryFrames = 300;
-  auto& profile = g_switchAuroraEndFrameProfile;
-  profile.frames++;
-  profile.total += total;
-  profile.fifoDrain += fifoDrain;
-  profile.gfxEnd += gfxEnd;
-  profile.render += render;
-  profile.rml += rml;
-  profile.copyPass += copyPass;
-  profile.finish += finish;
-  profile.submit += submit;
-  profile.afterSubmit += afterSubmit;
-  profile.present += present;
-
-  if (profile.frames < LogEveryFrames) {
-    return;
-  }
-
-  const double inv = 1.0 / static_cast<double>(profile.frames);
-  Log.info("[SwitchProfile][aurora_end] avg_ms total={:.3f} fifo={:.3f} gfxEnd={:.3f} render={:.3f} rml={:.3f} copy={:.3f} finish={:.3f} submit={:.3f} afterSubmit={:.3f} present={:.3f}",
-           profile.total * inv, profile.fifoDrain * inv, profile.gfxEnd * inv, profile.render * inv,
-           profile.rml * inv, profile.copyPass * inv, profile.finish * inv, profile.submit * inv,
-           profile.afterSubmit * inv, profile.present * inv);
-  profile = {};
-}
-#endif
-
 #ifdef AURORA_ENABLE_GX
 // GPU
 using webgpu::g_device;
 using webgpu::g_queue;
 using webgpu::g_surface;
+
+uint32_t clamp_scissor_coord(double value, uint32_t maximum) noexcept {
+  if (!std::isfinite(value)) {
+    return 0;
+  }
+  return static_cast<uint32_t>(std::clamp(value, 0.0, static_cast<double>(maximum)));
+}
+
+void set_present_viewport(const wgpu::RenderPassEncoder& pass, const gfx::Viewport& viewport, uint32_t surfaceWidth,
+                          uint32_t surfaceHeight) noexcept {
+  pass.SetViewport(viewport.left, viewport.top, viewport.width, viewport.height, viewport.znear, viewport.zfar);
+  const auto scissorX = clamp_scissor_coord(std::floor(viewport.left), surfaceWidth);
+  const auto scissorY = clamp_scissor_coord(std::floor(viewport.top), surfaceHeight);
+  const auto scissorRight = clamp_scissor_coord(std::ceil(viewport.left + viewport.width), surfaceWidth);
+  const auto scissorBottom = clamp_scissor_coord(std::ceil(viewport.top + viewport.height), surfaceHeight);
+  pass.SetScissorRect(scissorX, scissorY, scissorRight - scissorX, scissorBottom - scissorY);
+}
 #endif
 
 #ifdef AURORA_ENABLE_GX
@@ -125,9 +76,9 @@ constexpr std::array PreferredBackendOrder{
 // #ifdef DAWN_ENABLE_BACKEND_DESKTOP_GL
 //     BACKEND_OPENGL,
 // #endif
-// #ifdef DAWN_ENABLE_BACKEND_OPENGLES
-//     BACKEND_OPENGLES,
-// #endif
+#ifdef DAWN_ENABLE_BACKEND_OPENGLES
+    BACKEND_OPENGLES,
+#endif
 #ifdef DAWN_ENABLE_BACKEND_NULL
     BACKEND_NULL,
 #endif
@@ -141,19 +92,26 @@ bool g_initialFrame = false;
 AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexcept {
   g_config = config;
   Log.info("Aurora initializing");
+  log_system_information();
   if (g_config.appName == nullptr) {
     g_config.appName = "Aurora";
   } else {
     g_config.appName = strdup(g_config.appName);
   }
-  if (g_config.configPath == nullptr) {
-#if defined(__SWITCH__)
-    g_config.configPath = strdup("sdmc:/aurora");
-#else
-    g_config.configPath = SDL_GetPrefPath(nullptr, g_config.appName);
-#endif
+  if (g_config.userPath == nullptr) {
+    g_config.userPath = SDL_GetPrefPath(nullptr, g_config.appName);
   } else {
-    g_config.configPath = strdup(g_config.configPath);
+    g_config.userPath = strdup(g_config.userPath);
+  }
+  if (g_config.cachePath == nullptr) {
+    g_config.cachePath = SDL_GetPrefPath(nullptr, g_config.appName);
+  } else {
+    g_config.cachePath = strdup(g_config.cachePath);
+  }
+  if (g_config.resourcesPath == nullptr) {
+    g_config.resourcesPath = SDL_GetBasePath();
+  } else {
+    g_config.resourcesPath = strdup(g_config.resourcesPath);
   }
   if (g_config.msaa == 0) {
     g_config.msaa = 1;
@@ -163,11 +121,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   }
   ASSERT(window::initialize(), "Error initializing window");
 
-#if defined(__SWITCH__)
-  g_sdlCustomEventsStart = 0x8000;
-#else
   g_sdlCustomEventsStart = SDL_RegisterEvents(2);
-#endif
   ASSERT(g_sdlCustomEventsStart, "Failed to allocate user events: {}", SDL_GetError());
   ASSERT(window::initialize_event_watch(), "Error initializing SDL event watch");
 
@@ -176,7 +130,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   AuroraBackend selectedBackend = config.desiredBackend;
   bool windowCreated = false;
   if (selectedBackend != BACKEND_AUTO && window::create_window(selectedBackend)) {
-    if (webgpu::initialize(selectedBackend)) {
+    if (webgpu::initialize(selectedBackend, config.allowCpuAdapter)) {
       windowCreated = true;
     } else {
       window::destroy_window();
@@ -189,7 +143,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
       if (!window::create_window(selectedBackend)) {
         continue;
       }
-      if (webgpu::initialize(selectedBackend)) {
+      if (webgpu::initialize(selectedBackend, config.allowCpuAdapter)) {
         windowCreated = true;
         break;
       } else {
@@ -215,13 +169,11 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
 #ifdef AURORA_ENABLE_GX
   gfx::initialize();
 
-#ifdef AURORA_ENABLE_IMGUI
   imgui::create_context();
-#endif
 #endif
   const auto size = window::get_window_size();
   Log.info("Using framebuffer size {}x{} scale {}", size.fb_width, size.fb_height, size.scale);
-#ifdef AURORA_ENABLE_IMGUI
+#ifdef AURORA_ENABLE_GX
   if (g_config.imGuiInitCallback != nullptr) {
     g_config.imGuiInitCallback(&size);
   }
@@ -236,25 +188,20 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   g_config.desiredBackend = selectedBackend;
   return {
       .backend = selectedBackend,
-      .configPath = g_config.configPath,
+      .userPath = g_config.userPath,
+      .cachePath = g_config.cachePath,
       .window = window::get_sdl_window(),
       .windowSize = size,
   };
 }
 
-#ifdef AURORA_ENABLE_GX
-wgpu::TextureView g_currentView;
-#endif
-
 void shutdown() noexcept {
+#ifdef AURORA_ENABLE_GX
+  gfx::render_worker::synchronize();
 #ifdef AURORA_ENABLE_RMLUI
   rmlui::shutdown();
 #endif
-#ifdef AURORA_ENABLE_GX
-  g_currentView = {};
-#ifdef AURORA_ENABLE_IMGUI
   imgui::shutdown();
-#endif
   gfx::shutdown();
   webgpu::shutdown();
 #endif
@@ -273,86 +220,25 @@ const AuroraEvent* update() noexcept {
 
 bool begin_frame() noexcept {
   ZoneScoped;
-#ifdef __SWITCH__
-  {
-    static unsigned bf_iter = 0;
-    if (bf_iter < 10) {
-      char b[80];
-      std::snprintf(b, sizeof b, "[aurora] begin_frame iter=%u\n", bf_iter);
-      dusk_switch_log(b);
-    }
-    ++bf_iter;
-  }
-#endif
 #ifdef AURORA_ENABLE_GX
   {
-    window::SurfaceLock surfaceLock;
     if (!window::is_presentable()) {
       webgpu::release_surface();
-#ifdef __SWITCH__
-      { dusk_switch_log("[aurora] begin_frame -> !is_presentable\n"); }
-#endif
       return false;
     }
     if (window::is_paused()) {
-#ifdef __SWITCH__
-      { dusk_switch_log("[aurora] begin_frame -> is_paused\n"); }
-#endif
       return false;
     }
     if (!g_surface) {
       webgpu::refresh_surface(true);
       if (!g_surface) {
-#ifdef __SWITCH__
-        { dusk_switch_log("[aurora] begin_frame -> !g_surface (refresh failed)\n"); }
-#endif
         return false;
       }
     }
-    wgpu::SurfaceTexture surfaceTexture;
-    g_surface.GetCurrentTexture(&surfaceTexture);
-#ifdef __SWITCH__
-    {
-      static unsigned gt_iter = 0;
-      if (gt_iter < 10) {
-        char b[96];
-        std::snprintf(b, sizeof b, "[aurora] begin_frame GetCurrentTexture status=%d iter=%u\n",
-                      (int)surfaceTexture.status, gt_iter);
-        dusk_switch_log(b);
-      }
-      ++gt_iter;
-    }
-#endif
-    switch (surfaceTexture.status) {
-    case wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal:
-      g_currentView = surfaceTexture.texture.CreateView();
-      break;
-    case wgpu::SurfaceGetCurrentTextureStatus::Timeout:
-      Log.warn("Surface texture acquisition timed out");
-      return false;
-    case wgpu::SurfaceGetCurrentTextureStatus::SuccessSuboptimal:
-    case wgpu::SurfaceGetCurrentTextureStatus::Outdated:
-      Log.info("Surface texture is {}, reconfiguring swapchain", magic_enum::enum_name(surfaceTexture.status));
-      webgpu::refresh_surface(false);
-      return false;
-    case wgpu::SurfaceGetCurrentTextureStatus::Lost:
-      Log.warn("Surface texture is {}, releasing surface", magic_enum::enum_name(surfaceTexture.status));
-      webgpu::release_surface();
-    case wgpu::SurfaceGetCurrentTextureStatus::Error:
-      Log.warn("Surface texture is {}, dropping surface", magic_enum::enum_name(surfaceTexture.status));
-      g_surface = {};
-      return false;
-    default:
-      Log.error("Failed to get surface texture: {}", magic_enum::enum_name(surfaceTexture.status));
-      return false;
-    }
   }
 
-#ifdef AURORA_ENABLE_IMGUI
   imgui::new_frame(window::get_window_size());
-#endif
   if (!gfx::begin_frame()) {
-    g_currentView = {};
     return false;
   }
 #endif
@@ -361,79 +247,58 @@ bool begin_frame() noexcept {
 
 void end_frame() noexcept {
   ZoneScoped;
-#ifdef __SWITCH__
-  {
-    static unsigned ef_iter = 0;
-    if (ef_iter < 10) {
-      char b[80];
-      std::snprintf(b, sizeof b, "[aurora] end_frame iter=%u entry\n", ef_iter);
-      dusk_switch_log(b);
-    }
-    ++ef_iter;
+#ifdef AURORA_ENABLE_GX
+  gx::fifo::drain();
+  gfx::finish();
+  auto imguiDrawData = imgui::freeze();
+
+  const auto& presentSource = webgpu::present_source();
+  const auto viewport = webgpu::calculate_present_viewport(webgpu::g_graphicsConfig.surfaceConfiguration.width,
+                                                           webgpu::g_graphicsConfig.surfaceConfiguration.height,
+                                                           presentSource.size.width, presentSource.size.height);
+
+  wgpu::BindGroup rmlBindGroup;
+  bool rmlOverlay = false;
+#if AURORA_ENABLE_RMLUI
+  if (rmlui::is_initialized()) {
+    auto rmlFrame = rmlui::record_frame(viewport);
+    rmlBindGroup = std::move(rmlFrame.bindGroup);
+    rmlOverlay = rmlFrame.overlay;
   }
 #endif
-#ifdef AURORA_ENABLE_GX
-#if defined(__SWITCH__)
-  const auto profileStart = SwitchProfileClock::now();
-  auto profileStepStart = profileStart;
-  double profileFifoDrain = 0.0;
-  double profileGfxEnd = 0.0;
-  double profileRender = 0.0;
-  double profileRml = 0.0;
-  double profileCopyPass = 0.0;
-  double profileFinish = 0.0;
-  double profileSubmit = 0.0;
-  double profileAfterSubmit = 0.0;
-  double profilePresent = 0.0;
-#endif
-  gx::fifo::drain();
-#if defined(__SWITCH__)
-  auto profileNow = SwitchProfileClock::now();
-  profileFifoDrain = elapsed_ms(profileStepStart, profileNow);
-  profileStepStart = profileNow;
-#endif
-  const auto encoderDescriptor = wgpu::CommandEncoderDescriptor{
-      .label = "Redraw encoder",
-  };
-  auto encoder = g_device.CreateCommandEncoder(&encoderDescriptor);
-  gfx::end_frame(encoder);
-#if defined(__SWITCH__)
-  profileNow = SwitchProfileClock::now();
-  profileGfxEnd = elapsed_ms(profileStepStart, profileNow);
-  profileStepStart = profileNow;
-#endif
-  gfx::render(encoder);
-#if defined(__SWITCH__)
-  profileNow = SwitchProfileClock::now();
-  profileRender = elapsed_ms(profileStepStart, profileNow);
-  profileStepStart = profileNow;
-#endif
-  {
-    window::SurfaceLock surfaceLock;
-    if (window::is_presentable() && g_surface && g_currentView) {
-      const auto& presentSource = webgpu::present_source();
-      auto viewport = webgpu::calculate_present_viewport(webgpu::g_graphicsConfig.surfaceConfiguration.width,
-                                                         webgpu::g_graphicsConfig.surfaceConfiguration.height,
-                                                         presentSource.size.width, presentSource.size.height);
-      wgpu::BindGroup presentBindGroup = webgpu::g_CopyBindGroup;
-    #if AURORA_ENABLE_RMLUI
-      if (rmlui::is_initialized()) {
-      #if defined(__SWITCH__)
-        const auto profileRmlStart = SwitchProfileClock::now();
-      #endif
-        const auto rmlOutput = rmlui::render(encoder, viewport);
-      #if defined(__SWITCH__)
-        profileRml += elapsed_ms(profileRmlStart, SwitchProfileClock::now());
-      #endif
-        if (rmlOutput.texture != nullptr) {
-          presentBindGroup = rmlOutput.copyBindGroup;
+
+  gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport,
+                  imguiDrawData = std::move(imguiDrawData)](wgpu::CommandEncoder& encoder) {
+    wgpu::Texture currentTexture;
+    wgpu::TextureView currentView;
+    auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
+    {
+      window::SurfaceLock surfaceLock;
+      if (window::is_presentable() && g_surface) {
+        ZoneScopedN("Acquire texture");
+        wgpu::SurfaceTexture surfaceTexture;
+        g_surface.GetCurrentTexture(&surfaceTexture);
+        surfaceStatus = surfaceTexture.status;
+        if (surfaceStatus == wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal) {
+          currentTexture = std::move(surfaceTexture.texture);
+          currentView = currentTexture.CreateView();
         }
       }
-    #endif
+    }
+
+    const bool canPresent = currentTexture && currentView;
+    if (canPresent) {
+      wgpu::BindGroup presentBindGroup;
+      if (rmlBindGroup && !rmlOverlay) {
+        presentBindGroup = rmlBindGroup;
+      } else {
+        const auto& resampledSource = webgpu::resample_present_source(encoder, viewport);
+        presentBindGroup = webgpu::create_copy_bind_group(resampledSource);
+      }
       {
         const std::array attachments{
             wgpu::RenderPassColorAttachment{
-                .view = g_currentView,
+                .view = currentView,
                 .loadOp = wgpu::LoadOp::Clear,
                 .storeOp = wgpu::StoreOp::Store,
             },
@@ -442,26 +307,27 @@ void end_frame() noexcept {
             .label = "EFB copy render pass",
             .colorAttachmentCount = attachments.size(),
             .colorAttachments = attachments.data(),
+            .timestampWrites = webgpu::gpu_prof::pass_writes("Present blit"),
         };
         const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
         // Copy EFB -> XFB (swapchain)
         pass.SetPipeline(webgpu::g_CopyPipeline);
         pass.SetBindGroup(0, presentBindGroup, 0, nullptr);
-        pass.SetViewport(viewport.left, viewport.top, viewport.width, viewport.height, viewport.znear, viewport.zfar);
+        set_present_viewport(pass, viewport, webgpu::g_graphicsConfig.surfaceConfiguration.width,
+                             webgpu::g_graphicsConfig.surfaceConfiguration.height);
 
         pass.Draw(3);
+        if (rmlBindGroup && rmlOverlay) {
+          pass.SetPipeline(webgpu::g_CopyPremultipliedAlphaPipeline);
+          pass.SetBindGroup(0, rmlBindGroup, 0, nullptr);
+          pass.Draw(3);
+        }
         pass.End();
       }
-#if defined(__SWITCH__)
-      profileNow = SwitchProfileClock::now();
-      profileCopyPass = elapsed_ms(profileStepStart, profileNow) - profileRml;
-      profileStepStart = profileNow;
-#endif
-#if defined(AURORA_ENABLE_IMGUI) && !defined(AURORA_PLATFORM_SWITCH)
       {
         const std::array attachments{
             wgpu::RenderPassColorAttachment{
-                .view = g_currentView,
+                .view = currentView,
                 .loadOp = wgpu::LoadOp::Load,
                 .storeOp = wgpu::StoreOp::Store,
             },
@@ -470,84 +336,85 @@ void end_frame() noexcept {
             .label = "ImGui render pass",
             .colorAttachmentCount = attachments.size(),
             .colorAttachments = attachments.data(),
+            .timestampWrites = webgpu::gpu_prof::pass_writes("ImGui"),
         };
         const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
         pass.SetViewport(0.f, 0.f, static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.width),
                          static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.height), 0.f, 1.f);
-        imgui::render(pass);
+        imgui::render(pass, imguiDrawData);
         pass.End();
       }
-#endif
     } else {
       Log.info("Skipping present; window not presentable");
-      webgpu::release_surface();
     }
+    webgpu::gpu_prof::frame_end(encoder);
     const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Redraw command buffer"};
     const auto buffer = encoder.Finish(&cmdBufDescriptor);
-#if defined(__SWITCH__)
-    profileNow = SwitchProfileClock::now();
-    profileFinish = elapsed_ms(profileStepStart, profileNow);
-    profileStepStart = profileNow;
-#endif
-    g_queue.Submit(1, &buffer);
-#if defined(__SWITCH__)
-    profileNow = SwitchProfileClock::now();
-    profileSubmit = elapsed_ms(profileStepStart, profileNow);
-    profileStepStart = profileNow;
-#endif
-    gfx::after_submit();
-#if defined(__SWITCH__)
-    profileNow = SwitchProfileClock::now();
-    profileAfterSubmit = elapsed_ms(profileStepStart, profileNow);
-    profileStepStart = profileNow;
-#endif
-    if (window::is_presentable() && g_surface) {
-#ifdef __SWITCH__
-      { static unsigned p_iter = 0;
-        if (p_iter < 10) { char b[80]; std::snprintf(b, sizeof b, "[aurora] g_surface.Present iter=%u\n", p_iter); dusk_switch_log(b); }
-        ++p_iter; }
-#endif
-      auto presentStatus = g_surface.Present();
-#ifdef __SWITCH__
-      { static unsigned pp_iter = 0;
-        if (pp_iter < 10) { char b[80]; std::snprintf(b, sizeof b, "[aurora] g_surface.Present iter=%u status=%d\n", pp_iter, (int)presentStatus); dusk_switch_log(b); }
-        ++pp_iter; }
-#endif
-#if defined(__SWITCH__)
-      profileNow = SwitchProfileClock::now();
-      profilePresent = elapsed_ms(profileStepStart, profileNow);
-      profileStepStart = profileNow;
-#endif
-      if (presentStatus != wgpu::Status::Success) {
-        Log.warn("Surface present failed: {}", static_cast<int>(presentStatus));
+    {
+      ZoneScopedN("Queue Submit");
+      g_queue.Submit(1, &buffer);
+    }
+    webgpu::gpu_prof::after_submit();
+    if (canPresent && g_surface) {
+      ZoneScopedN("Present");
+      wgpu::ConvertibleStatus status = wgpu::Status::Error;
+      {
+        window::SurfaceLock surfaceLock;
+        if (window::is_presentable()) {
+          status = g_surface.Present();
+        }
+      }
+      if (status) {
+        gfx::after_present();
+      } else {
+        Log.warn("Surface present failed");
         webgpu::release_surface();
       }
     } else if (g_surface) {
-      webgpu::release_surface();
+      switch (surfaceStatus) {
+      case wgpu::SurfaceGetCurrentTextureStatus::Timeout:
+        Log.warn("Surface texture acquisition timed out");
+        break;
+      case wgpu::SurfaceGetCurrentTextureStatus::SuccessSuboptimal:
+      case wgpu::SurfaceGetCurrentTextureStatus::Outdated:
+        Log.info("Surface texture is {}, reconfiguring swapchain", magic_enum::enum_name(surfaceStatus));
+        window::push_custom_event(window::CustomEvent::RefreshSurface);
+        break;
+      case wgpu::SurfaceGetCurrentTextureStatus::Lost:
+        Log.warn("Surface texture is {}, releasing surface", magic_enum::enum_name(surfaceStatus));
+        webgpu::release_surface();
+        break;
+      case wgpu::SurfaceGetCurrentTextureStatus::Error:
+        Log.warn("Surface texture is {}, dropping surface", magic_enum::enum_name(surfaceStatus));
+        g_surface = {};
+        break;
+      default:
+        if (!window::is_presentable()) {
+          webgpu::release_surface();
+        } else {
+          Log.error("Failed to get surface texture: {}", magic_enum::enum_name(surfaceStatus));
+        }
+        break;
+      }
     }
-    g_currentView = {};
-  }
-#if defined(__SWITCH__)
-  record_switch_aurora_end_frame_profile(elapsed_ms(profileStart, SwitchProfileClock::now()), profileFifoDrain,
-                                         profileGfxEnd, profileRender, profileRml, profileCopyPass, profileFinish,
-                                         profileSubmit, profileAfterSubmit, profilePresent);
-#endif
+    gfx::after_submit();
 
-  TracyPlotConfig("aurora: lastVertSize", tracy::PlotFormatType::Memory, false, true, 0);
-  TracyPlotConfig("aurora: lastUniformSize", tracy::PlotFormatType::Memory, false, true, 0);
-  TracyPlotConfig("aurora: lastIndexSize", tracy::PlotFormatType::Memory, false, true, 0);
-  TracyPlotConfig("aurora: lastStorageSize", tracy::PlotFormatType::Memory, false, true, 0);
-  TracyPlotConfig("aurora: lastTextureUploadSize", tracy::PlotFormatType::Memory, false, true, 0);
+    TracyPlotConfig("aurora: lastVertSize", tracy::PlotFormatType::Memory, false, true, 0);
+    TracyPlotConfig("aurora: lastUniformSize", tracy::PlotFormatType::Memory, false, true, 0);
+    TracyPlotConfig("aurora: lastIndexSize", tracy::PlotFormatType::Memory, false, true, 0);
+    TracyPlotConfig("aurora: lastStorageSize", tracy::PlotFormatType::Memory, false, true, 0);
+    TracyPlotConfig("aurora: lastTextureUploadSize", tracy::PlotFormatType::Memory, false, true, 0);
 
-  TracyPlot("aurora: queuedPipelines", static_cast<int64_t>(gfx::g_stats.queuedPipelines));
-  TracyPlot("aurora: createdPipelines", static_cast<int64_t>(gfx::g_stats.createdPipelines));
-  TracyPlot("aurora: drawCallCount", static_cast<int64_t>(gfx::g_stats.drawCallCount));
-  TracyPlot("aurora: mergedDrawCallCount", static_cast<int64_t>(gfx::g_stats.mergedDrawCallCount));
-  TracyPlot("aurora: lastVertSize", static_cast<int64_t>(gfx::g_stats.lastVertSize));
-  TracyPlot("aurora: lastUniformSize", static_cast<int64_t>(gfx::g_stats.lastUniformSize));
-  TracyPlot("aurora: lastIndexSize", static_cast<int64_t>(gfx::g_stats.lastIndexSize));
-  TracyPlot("aurora: lastStorageSize", static_cast<int64_t>(gfx::g_stats.lastStorageSize));
-  TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(gfx::g_stats.lastTextureUploadSize));
+    TracyPlot("aurora: queuedPipelines", static_cast<int64_t>(gfx::g_stats.queuedPipelines));
+    TracyPlot("aurora: createdPipelines", static_cast<int64_t>(gfx::g_stats.createdPipelines));
+    TracyPlot("aurora: drawCallCount", static_cast<int64_t>(gfx::g_stats.drawCallCount));
+    TracyPlot("aurora: mergedDrawCallCount", static_cast<int64_t>(gfx::g_stats.mergedDrawCallCount));
+    TracyPlot("aurora: lastVertSize", static_cast<int64_t>(gfx::g_stats.lastVertSize));
+    TracyPlot("aurora: lastUniformSize", static_cast<int64_t>(gfx::g_stats.lastUniformSize));
+    TracyPlot("aurora: lastIndexSize", static_cast<int64_t>(gfx::g_stats.lastIndexSize));
+    TracyPlot("aurora: lastStorageSize", static_cast<int64_t>(gfx::g_stats.lastStorageSize));
+    TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(gfx::g_stats.lastTextureUploadSize));
+  });
 
 #endif
 }
@@ -574,4 +441,11 @@ void aurora_set_pause_on_focus_lost(bool value) { aurora::g_config.pauseOnFocusL
 void aurora_set_background_input(bool value) {
   aurora::g_config.allowJoystickBackgroundEvents = value;
   aurora::window::set_background_input(value);
+}
+void aurora_set_resampler(AuroraSampler sampler) {
+#ifdef AURORA_ENABLE_GX
+  aurora::webgpu::set_resampler(sampler);
+#else
+  (void)sampler;
+#endif
 }

@@ -3,6 +3,7 @@
 #include "../internal.hpp"
 #include "../gx/gx.hpp"
 #include "../webgpu/gpu.hpp"
+#include "../webgpu/gpu_prof.hpp"
 #include "texture.hpp"
 #include "../gx/gx_fmt.hpp"
 
@@ -399,10 +400,13 @@ void initialize() {
       Log.fatal("Output format mismatch for {}", conv.fmt);
     }
   }
-  for (const auto& conv : DepthConvPipelines) {
-    g_pipelines[conv.fmt] = create_pipeline(conv, DepthShaderPreamble, g_depthBindGroupLayout);
-    if (conv.outputFormat != to_wgpu(conv.fmt)) {
-      Log.fatal("Output format mismatch for {}", conv.fmt);
+  // Skip depth copies in compatibility mode
+  if (webgpu::g_hasCoreCompatibility) {
+    for (const auto& conv : DepthConvPipelines) {
+      g_pipelines[conv.fmt] = create_pipeline(conv, DepthShaderPreamble, g_depthBindGroupLayout);
+      if (conv.outputFormat != to_wgpu(conv.fmt)) {
+        Log.fatal("Output format mismatch for {}", conv.fmt);
+      }
     }
   }
 
@@ -431,8 +435,15 @@ void shutdown() {
 }
 
 static void execute(const wgpu::CommandEncoder& cmd, const ConvRequest& req, const wgpu::RenderPipeline& pipeline) {
+  if (!pipeline) {
+    return;
+  }
   wgpu::BindGroup bindGroup;
   if (gx::is_depth_format(req.fmt)) {
+    // Skip depth copies in compatibility mode
+    if (!webgpu::g_hasCoreCompatibility) {
+      return;
+    }
     const std::array bindGroupEntries{
         wgpu::BindGroupEntry{
             .binding = 0,
@@ -489,6 +500,7 @@ static void execute(const wgpu::CommandEncoder& cmd, const ConvRequest& req, con
       .label = "TexCopyConv Pass",
       .colorAttachmentCount = colorAttachments.size(),
       .colorAttachments = colorAttachments.data(),
+      .timestampWrites = webgpu::gpu_prof::pass_writes("EFB copy convert"),
   };
   const auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
   pass.SetPipeline(pipeline);

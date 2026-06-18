@@ -19,6 +19,7 @@
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_pixels.h>
+#include <tracy/Tracy.hpp>
 
 #if defined(SDL_PLATFORM_ANDROID)
 #include <jni.h>
@@ -53,6 +54,7 @@ std::atomic_bool g_surfaceReady = false;
 std::atomic_bool g_surfaceReady = true;
 #endif
 bool g_lastPaused = false;
+bool g_gotFocus = false;
 
 bool operator==(const AuroraWindowSize& lhs, const AuroraWindowSize& rhs) {
   return lhs.width == rhs.width && lhs.height == rhs.height && lhs.fb_width == rhs.fb_width &&
@@ -83,9 +85,6 @@ Vec2<int> fit_frame_buffer_to_aspect(int width, int height, float aspect) {
 }
 
 void resize_swapchain() noexcept {
-#if defined(SDL_PLATFORM_ANDROID)
-  SurfaceLock surfaceLock;
-#endif
   const auto size = get_window_size();
   if (size == g_windowSize) {
     return;
@@ -121,12 +120,14 @@ void set_window_icon() noexcept {
 
 bool SDLCALL lifecycle_event_watch(void*, SDL_Event* event) {
   switch (event->type) {
+#if defined(SDL_PLATFORM_ANDROID) || defined(SDL_PLATFORM_APPLE)
   case SDL_EVENT_WINDOW_MINIMIZED:
     g_backgrounded.store(true, std::memory_order_relaxed);
     break;
   case SDL_EVENT_WINDOW_RESTORED:
     g_backgrounded.store(false, std::memory_order_relaxed);
     break;
+#endif
   default:
     break;
   }
@@ -211,7 +212,6 @@ void process_event(SDL_Event& event) {
     } else if (event.type == g_sdlCustomEventsStart + CustomEvent::RefreshSurface) {
       // Refresh surface (vsync changed)
 #ifdef AURORA_ENABLE_GX
-      SurfaceLock surfaceLock;
       webgpu::refresh_surface(false);
 #endif
     }
@@ -227,20 +227,31 @@ void process_event(SDL_Event& event) {
 } // namespace
 
 const AuroraEvent* poll_events() {
+  ZoneScoped;
   g_events.clear();
 
   SDL_Event event;
   // Clear out the previous scroll values to prevent ghost input
   input::set_mouse_scroll(0, 0);
   if (is_paused()) {
+    ZoneScopedN("SDL_WaitEvent (paused)");
     if (SDL_WaitEvent(&event)) {
       process_event(event);
     } else {
       Log.warn("SDL_WaitEvent failed: {}", SDL_GetError());
     }
   }
-  while (SDL_PollEvent(&event)) {
-    process_event(event);
+  while (true) {
+    bool hasEvent = false;
+    {
+      ZoneScopedN("SDL_PollEvent");
+      hasEvent = SDL_PollEvent(&event);
+    }
+    if (hasEvent) {
+      process_event(event);
+    } else {
+      break;
+    }
   }
   g_events.push_back(AuroraEvent{
       .type = AURORA_NONE,
@@ -258,28 +269,6 @@ bool create_window(AuroraBackend backend) {
     flags |= SDL_WINDOW_FULLSCREEN;
   }
 #endif
-  switch (backend) {
-#ifdef AURORA_ENABLE_GX
-#ifdef DAWN_ENABLE_BACKEND_VULKAN
-  case BACKEND_VULKAN:
-    flags |= SDL_WINDOW_VULKAN;
-    break;
-#endif
-#ifdef DAWN_ENABLE_BACKEND_METAL
-  case BACKEND_METAL:
-    flags |= SDL_WINDOW_METAL;
-    break;
-#endif
-#ifdef DAWN_ENABLE_BACKEND_OPENGL
-  case BACKEND_OPENGL:
-  case BACKEND_OPENGLES:
-    flags |= SDL_WINDOW_OPENGL;
-    break;
-#endif
-#endif
-  default:
-    break;
-  }
   auto width = static_cast<Sint32>(g_config.windowWidth);
   auto height = static_cast<Sint32>(g_config.windowHeight);
   if (width == 0 || height == 0) {
@@ -313,6 +302,8 @@ bool create_window(AuroraBackend backend) {
       SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, SDL_GetError());
   TRY(SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, flags), "Failed to set {}: {}",
       SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, SDL_GetError());
+  TRY(SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_EXTERNAL_GRAPHICS_CONTEXT_BOOLEAN, backend != BACKEND_NULL),
+      "Failed to set {}: {}", SDL_PROP_WINDOW_CREATE_EXTERNAL_GRAPHICS_CONTEXT_BOOLEAN, SDL_GetError());
   g_window = SDL_CreateWindowWithProperties(props);
   if (g_window == nullptr) {
     Log.error("Failed to create window: {}", SDL_GetError());
@@ -453,6 +444,11 @@ bool is_paused() noexcept {
   const auto flags = SDL_GetWindowFlags(g_window);
   if ((flags & SDL_WINDOW_HIDDEN) != 0u) {
     return true;
+  }
+  // Wait until the window has received focus before respecting pauseOnFocusLost
+  if (!g_gotFocus) {
+    g_gotFocus = (flags & SDL_WINDOW_INPUT_FOCUS) != 0u;
+    return false;
   }
   return g_config.pauseOnFocusLost && ((flags & SDL_WINDOW_INPUT_FOCUS) == 0u || (flags & SDL_WINDOW_MINIMIZED) != 0u);
 }
