@@ -10,6 +10,10 @@
 #include <SDL3/SDL_iostream.h>
 #include <SDL3/SDL_surface.h>
 
+#ifdef AURORA_PLATFORM_SWITCH
+#include <png.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <limits>
@@ -72,6 +76,64 @@ struct CompiledFilter {
 };
 
 Image get_image(const Rml::String& source) {
+#ifdef AURORA_PLATFORM_SWITCH
+  // Switch has no SDL_image (SDL_LoadPNG_IO is a stub), so decode PNG with libpng
+  // (linked into aurora_core) and return RGBA8 directly. This path existed in the
+  // original Switch port (f0f3511) and was dropped by the v13 re-port -- restored.
+  FileInterface_SDL fileInterface;
+  const Rml::FileHandle file = fileInterface.Open(source);
+  if (file == Rml::FileHandle{}) {
+    return {};
+  }
+
+  const size_t encodedSize = fileInterface.Length(file);
+  if (encodedSize == 0) {
+    fileInterface.Close(file);
+    return {};
+  }
+
+  std::vector<uint8_t> encoded(encodedSize);
+  const size_t bytesRead = fileInterface.Read(encoded.data(), encoded.size(), file);
+  fileInterface.Close(file);
+  if (bytesRead != encoded.size()) {
+    Log.warn("Failed to read image '{}': read {} of {} bytes", source, bytesRead, encoded.size());
+    return {};
+  }
+
+  png_image image{};
+  image.version = PNG_IMAGE_VERSION;
+  if (png_image_begin_read_from_memory(&image, encoded.data(), encoded.size()) == 0) {
+    Log.warn("Failed to decode PNG header '{}': {}", source, image.message);
+    return {};
+  }
+
+  image.format = PNG_FORMAT_RGBA;
+  const size_t decodedSize = PNG_IMAGE_SIZE(image);
+  auto ptr = std::make_unique<uint8_t[]>(decodedSize);
+  if (png_image_finish_read(&image, nullptr, ptr.get(), 0, nullptr) == 0) {
+    Log.warn("Failed to decode PNG '{}': {}", source, image.message);
+    png_image_free(&image);
+    return {};
+  }
+
+  for (size_t i = 0; i < decodedSize; i += 4) {
+    const uint8_t alpha = ptr[i + 3];
+    for (size_t channel = 0; channel < 3; ++channel) {
+      ptr[i + channel] =
+          static_cast<uint8_t>((static_cast<uint32_t>(ptr[i + channel]) * static_cast<uint32_t>(alpha)) / 255);
+    }
+  }
+
+  const uint32_t iconWidth = image.width;
+  const uint32_t iconHeight = image.height;
+  png_image_free(&image);
+  return Image{
+      .data = std::move(ptr),
+      .size = decodedSize,
+      .width = iconWidth,
+      .height = iconHeight,
+  };
+#else
   FileInterface_SDL fileInterface;
   const Rml::FileHandle file = fileInterface.Open(source);
   if (file == Rml::FileHandle{}) {
@@ -120,6 +182,7 @@ Image get_image(const Rml::String& source) {
       .width = iconWidth,
       .height = iconHeight,
   };
+#endif
 }
 
 void sigma_to_params(float desiredSigma, int& passLevel, float& sigma) {
