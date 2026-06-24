@@ -105,6 +105,13 @@ static bool cache_init_core() {
   std::string file = fs_path_to_string(cache_path());
   Log.debug("Using dawn cache at {}", file);
 #ifdef __SWITCH__
+  // SQLite's unix VFS treats a "sdmc:"-prefixed path as RELATIVE (the leading char isn't '/') and
+  // mangles away the devoptab mount, so open() misses the file -> CANTOPEN(14). Strip "sdmc:" so the
+  // path is "/TwilitRealm/..." (absolute): SQLite passes it through unchanged and libnx resolves a
+  // leading '/' via the default sdmc devoptab.
+  if (file.rfind("sdmc:", 0) == 0) {
+    file.erase(0, 5);
+  }
   // libnx FsFs has no POSIX file locking (fcntl F_SETLK), so SQLite's default unix VFS returns
   // SQLITE_IOERR ("disk I/O error") on the first locking operation. Open with the lock-free
   // "unix-none" VFS so all locking becomes a no-op (single-process access is fine for our cache).

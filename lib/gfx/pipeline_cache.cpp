@@ -735,8 +735,14 @@ static bool prepare_pipeline_cache_db() {
     return true;
   }
 
-  const auto path = fs_path_to_string(std::filesystem::path{g_config.cachePath} / "pipeline_cache.db");
+  auto path = fs_path_to_string(std::filesystem::path{g_config.cachePath} / "pipeline_cache.db");
 #ifdef __SWITCH__
+  // SQLite's unix VFS treats a "sdmc:"-prefixed path as RELATIVE and mangles away the devoptab mount,
+  // so open() misses the file -> CANTOPEN(14). Strip "sdmc:" so the path is "/TwilitRealm/..."
+  // (absolute), which SQLite passes through and libnx resolves via the default sdmc devoptab.
+  if (path.rfind("sdmc:", 0) == 0) {
+    path.erase(0, 5);
+  }
   // libnx FsFs has no POSIX fcntl byte-range locking, so the default "unix" VFS returns
   // SQLITE_IOERR on the first lock. "unix-none" makes all locking a no-op (single-process app).
   auto ret = sqlite3_open_v2(path.c_str(), &g_pipelineCacheDb,

@@ -187,7 +187,11 @@ inline bool SDL_WriteS32LE(SDL_IOStream* stream, Sint32 value) {
 inline const char* SDL_GetBasePath() { return "romfs:/"; }
 
 inline char* SDL_GetPrefPath(const char*, const char*) {
-  constexpr const char* path = "sdmc:/game/";
+  // Single-folder layout (HayatoG/dusklight#5): the prefPath IS the data dir. With no
+  // data_location.json descriptor, default_data_path() returns this verbatim, so config, saves,
+  // caches and logs all live under one folder. Must match DUSK_SD_DATA_ROOT in
+  // platforms/switch/src/switch_stubs.cpp.
+  constexpr const char* path = "sdmc:/TwilitRealm/Dusklight/";
   auto* out = static_cast<char*>(std::malloc(std::strlen(path) + 1));
   if (out != nullptr) {
     std::strcpy(out, path);

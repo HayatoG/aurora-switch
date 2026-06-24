@@ -59,6 +59,67 @@ std::filesystem::path GetCardFullPath(const std::filesystem::path& path, const a
     return path / fmt::format("MemoryCard{}.{}.raw", slot == aurora::card::ECardSlot::SlotA ? "A" : "B", GetCardRegion());
   }
 }
+
+#ifdef __SWITCH__
+// Returns true if `dir` exists and contains at least one .gci save file.
+bool SwitchCardDirHasSave(const std::filesystem::path& dir) {
+  std::error_code ec;
+  if (!std::filesystem::is_directory(dir, ec)) {
+    return false;
+  }
+  for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+    if (ec) {
+      break;
+    }
+    if (entry.is_regular_file() && entry.path().extension() == ".gci") {
+      return true;
+    }
+  }
+  return false;
+}
+
+// One-time, non-destructive migration of a memory card left behind by older builds. The save dir
+// used to live under sdmc:/aurora (and Dan's dusk.nro used sdmc:/game) before userPath moved to the
+// data folder (sdmc:/TwilitRealm/Dusklight). If our canonical card dir has no .gci yet but a legacy
+// location does, copy the save over so players who upgrade don't lose progress. Copy only — never
+// move or overwrite. See HayatoG/dusklight#4.
+void SwitchMigrateLegacyCard(const std::filesystem::path& dest, aurora::card::ECardSlot slot) {
+  if (SwitchCardDirHasSave(dest)) {
+    return;
+  }
+  static constexpr const char* kLegacyBases[] = {"sdmc:/aurora", "sdmc:/game", "sdmc:/game/GC"};
+  for (const char* base : kLegacyBases) {
+    const auto src = GetCardFullPath(base, slot);
+    if (src == dest || !SwitchCardDirHasSave(src)) {
+      continue;
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(dest, ec);
+    for (const auto& entry : std::filesystem::directory_iterator(src, ec)) {
+      if (ec) {
+        break;
+      }
+      if (!entry.is_regular_file() || entry.path().extension() != ".gci") {
+        continue;
+      }
+      const auto target = dest / entry.path().filename();
+      if (std::filesystem::exists(target)) {
+        continue;
+      }
+      std::error_code copyEc;
+      std::filesystem::copy_file(entry.path(), target, copyEc);
+      if (copyEc) {
+        Log.warn("Legacy card migrate: failed to copy {} -> {}: {}", fs_path_to_string(entry.path()),
+                 fs_path_to_string(target), copyEc.message());
+      } else {
+        Log.info("Legacy card migrate: copied {} -> {}", fs_path_to_string(entry.path()),
+                 fs_path_to_string(target));
+      }
+    }
+    break;  // first legacy location with a save wins
+  }
+}
+#endif
 } // namespace
 
 extern "C" {
@@ -188,6 +249,10 @@ void CARDInit(const char* game, const char* maker) {
     }
 
     const auto& curPath = cardPaths[i];
+
+#ifdef __SWITCH__
+    SwitchMigrateLegacyCard(curPath, static_cast<aurora::card::ECardSlot>(i));
+#endif
 
     std::error_code ec;
     if (std::filesystem::exists(curPath, ec) && CardChannels[i]->open(curPath)) {
